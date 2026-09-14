@@ -50,3 +50,15 @@ pub fn rasterize_page_to_bevy(
 pub fn extract_text(docx: &[u8]) -> Result<String, DocxError> {
     default_backend().extract_text(docx)
 }
+
+pub fn rasterize_all(docx: &[u8], dpi: u32) -> Result<Vec<crate::common::ImageBuffer>, DocxError> {
+    default_backend().rasterize_all(docx, dpi)
+}
+
+pub fn rasterize_all_to_bevy(docx: &[u8], dpi: u32) -> Result<Vec<bevy::image::Image>, DocxError> {
+    rasterize_all(docx, dpi)?
+        .iter()
+        .map(crate::common::to_bevy_image)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DocxError::Image)
+}
