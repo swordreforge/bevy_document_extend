@@ -18,7 +18,7 @@ xlsx-office2pdf = ["dep:office2pdf"]
 xlsx-calamine-office2pdf = ["xlsx-calamine", "xlsx-office2pdf", "pdf-hayro"]
 
 [dependencies]
-bevy = "0.19.1"
+bevy = { version = "0.19.1", features = ["gestures"] }
 image = "0.25"
 hayro = { version = "0.7", optional = true }
 zpdf = { version = "0.13", optional = true }

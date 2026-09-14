@@ -6,17 +6,29 @@
 //! format is needed per key press.
 //!
 //! Layout: full-window scrollable page image, bottom HUD bar with the probe
-//! line plus `←/→ page · wheel scroll · Ctrl+wheel / ↑/↓ zoom · 0 fit · Q quit`.
+//! line plus `←/→ page · wheel/pinch scroll · Ctrl+wheel/pinch zoom · ↑/↓ zoom · 0 fit · Q quit`.
 //!
-//! Zoom model: continuous `zoom` multiplier (1.0 = [`BASE_DPI`] render).
-//! The page Node is sized as `pixels * zoom * BASE_DPI / render_dpi`, so
-//! fractional wheel steps stay smooth. Backends still take integer dpi, so
-//! [`render_dpi`] rounds — a future float-dpi backend only replaces that one
-//! function, the UI side is already float.
+//! Input routing: plain wheel scrolls the viewport; `Ctrl+wheel` zooms (this
+//! is how Wayland/X11 synthesize trackpad pinch — the compositor sends wheel
+//! events with the Ctrl modifier, since winit only emits `PinchGesture` on
+//! macOS/iOS). `PinchGesture` itself is also handled for those platforms.
+//!
+//! Zoom model: two-level continuous zoom.
+//!
+//! - Display zoom (`Doc::zoom`) is a float updated immediately on every
+//!   input tick; the page Node is resized from the *existing* texture, so
+//!   gestures stay smooth at 60fps with pure GPU scaling.
+//! - Render resolution (`Doc::rendered_zoom` + integer `dpi`) only refreshes
+//!   after the zoom settles ([`RERASTER_DELAY`]) *and* drifts outside
+//!   [`RERASTER_BAND`], so a pinch doesn't re-rasterize ten times mid-gesture.
+//!   Backends still take integer dpi, so [`render_dpi`] rounds — a future
+//!   float-dpi backend only replaces that one function, the UI side is
+//!   already float.
 //!
 //! This file is a shared module, not a runnable example: every viewer does
 //! `#[path = "viewer_common/mod.rs"] mod viewer_common;` to include it.
 
+use bevy::input::gestures::PinchGesture;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -26,8 +38,16 @@ const BASE_DPI: f32 = 150.0;
 const MIN_ZOOM: f32 = 0.2;
 const MAX_ZOOM: f32 = 4.0;
 const KEY_ZOOM_STEP: f32 = 1.25;
-const WHEEL_ZOOM_SPEED: f32 = 0.12;
+/// Trackpad pinch arrives as Ctrl+wheel with tiny per-tick deltas, so the
+/// zoom gain must be much higher than for stepped mouse wheels.
+const WHEEL_ZOOM_SPEED: f32 = 0.35;
 const LINE_SCROLL_PX: f32 = 32.0;
+/// Zoom must sit still this long before a re-raster fires, so mid-gesture
+/// ticks only GPU-scale the existing texture.
+const RERASTER_DELAY: f32 = 0.25;
+/// Re-raster only when display zoom drifts this far (relative) from the
+/// rendered zoom — filters out sub-pixel settle noise.
+const RERASTER_BAND: f32 = 0.04;
 /// Assumed window width before the first real size is observed; the
 /// [`auto_fit`] system corrects it on the first frame anyway.
 const ASSUMED_WINDOW_W: f32 = 1280.0;
@@ -39,14 +59,30 @@ struct Doc {
     probe: String,
     pages: usize,
     page: usize,
-    /// Continuous UI zoom; 1.0 shows a BASE_DPI render at native pixels.
+    /// Display zoom; 1.0 shows a BASE_DPI render at native pixels. Updated
+    /// on every input tick; only drives the page Node size.
     zoom: f32,
+    /// Zoom level the current texture was rendered at. Chases `zoom` via
+    /// debounced re-raster in [`maybe_reraster`].
+    rendered_zoom: f32,
+    /// Seconds since the last zoom input; gates the re-raster in
+    /// [`maybe_reraster`].
+    zoom_idle: f32,
     /// Page width in pixels at BASE_DPI; fit-to-width target is derived from this.
     native_w: f32,
     /// False until the user zooms (or passes an explicit dpi); while false
     /// [`auto_fit`] keeps the page fitted to the window width.
     manual_zoom: bool,
+    /// Last rendered texture size, for [`display_size`] without re-render.
+    tex_w: u32,
+    tex_h: u32,
+    /// Committed render dpi. [`maybe_reraster`] updates it from the display
+    /// zoom after a settle delay; [`refresh`] re-renders only when
+    /// `(page, dpi)` differs from `(rendered_page, rendered_dpi)`, so
+    /// per-tick display-zoom changes never trigger a raster.
     dpi: u32,
+    rendered_page: usize,
+    rendered_dpi: u32,
     image: Handle<Image>,
     render: Box<dyn Fn(usize, u32) -> Option<Image> + Send + Sync>,
 }
@@ -64,10 +100,21 @@ fn render_dpi(zoom: f32) -> u32 {
     (BASE_DPI * zoom).round().clamp(36.0, 600.0) as u32
 }
 
-fn set_zoom(doc: &mut Doc, zoom: f32) {
+/// Display-side zoom update: resize the page Node from the existing texture
+/// immediately; the expensive re-raster happens later in [`maybe_reraster`].
+fn apply_display_zoom(
+    doc: &mut Doc,
+    zoom: f32,
+    page_nodes: &mut Query<(&mut Node, &mut ImageNode), With<PageImage>>,
+) {
     doc.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-    doc.dpi = render_dpi(doc.zoom);
+    doc.zoom_idle = 0.0;
     doc.manual_zoom = true;
+    let (w, h) = display_size(doc.tex_w, doc.tex_h, doc.zoom, doc.dpi);
+    for (mut node, _) in page_nodes {
+        node.width = Val::Px(w);
+        node.height = Val::Px(h);
+    }
 }
 
 fn fit_zoom(window_w: f32, native_w: f32) -> f32 {
@@ -104,7 +151,9 @@ pub fn run(
     } else {
         (dpi as f32 / BASE_DPI).clamp(MIN_ZOOM, MAX_ZOOM)
     };
-    let (w, h) = display_size(first.width(), first.height(), zoom, render_dpi(zoom));
+    let dpi = render_dpi(zoom);
+    let (w, h) = display_size(first.width(), first.height(), zoom, dpi);
+    let (tex_w, tex_h) = (first.width(), first.height());
     let mut app = App::new();
     app.add_plugins(DefaultPlugins)
         .insert_resource(ClearColor(Color::srgb(0.12, 0.12, 0.14)))
@@ -113,9 +162,15 @@ pub fn run(
             pages,
             page,
             zoom,
+            rendered_zoom: zoom,
+            zoom_idle: RERASTER_DELAY,
             native_w,
             manual_zoom: !fit,
-            dpi: render_dpi(zoom),
+            tex_w,
+            tex_h,
+            dpi,
+            rendered_page: page,
+            rendered_dpi: dpi,
             image: Handle::default(),
             render: Box::new(render),
             title,
@@ -131,7 +186,10 @@ pub fn run(
     app.add_systems(Startup, move |mut commands: Commands, doc: Res<Doc>| {
         setup_ui(&mut commands, &doc, w, h);
     })
-    .add_systems(Update, (navigate, auto_fit, wheel, refresh).chain())
+    .add_systems(
+        Update,
+        (navigate, auto_fit, wheel, maybe_reraster, refresh).chain(),
+    )
     .run();
 }
 
@@ -192,7 +250,7 @@ fn setup_ui(commands: &mut Commands, doc: &Doc, w: f32, h: f32) {
 
 fn hud_line(doc: &Doc) -> String {
     format!(
-        "{} — {} · page {}/{} · {}dpi · {:.0}% · ←/→ page · wheel scroll · Ctrl+wheel/↑/↓ zoom · 0 fit · Q quit",
+        "{} — {} · page {}/{} · {}dpi · {:.0}% · ←/→ page · wheel scroll · Ctrl+wheel/pinch zoom · ↑/↓ zoom · 0 fit · Q quit",
         doc.title,
         doc.probe,
         doc.page + 1,
@@ -202,17 +260,21 @@ fn hud_line(doc: &Doc) -> String {
     )
 }
 
-fn navigate(keys: Res<ButtonInput<KeyCode>>, mut doc: ResMut<Doc>) {
+fn navigate(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut doc: ResMut<Doc>,
+    mut page_nodes: Query<(&mut Node, &mut ImageNode), With<PageImage>>,
+) {
     if keys.just_pressed(KeyCode::ArrowRight) && doc.page + 1 < doc.pages {
         doc.page += 1;
     } else if keys.just_pressed(KeyCode::ArrowLeft) && doc.page > 0 {
         doc.page -= 1;
     } else if keys.just_pressed(KeyCode::ArrowUp) {
         let zoom = doc.zoom * KEY_ZOOM_STEP;
-        set_zoom(&mut doc, zoom);
+        apply_display_zoom(&mut doc, zoom, &mut page_nodes);
     } else if keys.just_pressed(KeyCode::ArrowDown) {
         let zoom = doc.zoom / KEY_ZOOM_STEP;
-        set_zoom(&mut doc, zoom);
+        apply_display_zoom(&mut doc, zoom, &mut page_nodes);
     } else if keys.just_pressed(KeyCode::Digit0) {
         doc.manual_zoom = false;
     } else if keys.just_pressed(KeyCode::KeyQ) {
@@ -222,64 +284,119 @@ fn navigate(keys: Res<ButtonInput<KeyCode>>, mut doc: ResMut<Doc>) {
 
 fn wheel(
     mut wheels: MessageReader<MouseWheel>,
+    mut pinches: MessageReader<PinchGesture>,
     keys: Res<ButtonInput<KeyCode>>,
     mut doc: ResMut<Doc>,
     mut scroll: Query<&mut ScrollPosition, With<Viewport>>,
+    mut page_nodes: Query<(&mut Node, &mut ImageNode), With<PageImage>>,
 ) {
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let mut lines = Vec2::ZERO;
     let mut scroll_px = Vec2::ZERO;
+    let mut saw_pixel_wheel = false;
     for wheel in wheels.read() {
         match wheel.unit {
             MouseScrollUnit::Line => lines += Vec2::new(wheel.x, wheel.y),
-            MouseScrollUnit::Pixel => scroll_px += Vec2::new(wheel.x, wheel.y),
+            // Trackpad scroll/pinch arrives as many tiny Pixel ticks; keep
+            // them out of the Line accumulator so zoom math stays in one unit.
+            MouseScrollUnit::Pixel => {
+                scroll_px += Vec2::new(wheel.x, wheel.y);
+                saw_pixel_wheel = true;
+            }
         }
     }
-    if lines != Vec2::ZERO || scroll_px != Vec2::ZERO {
-        if ctrl {
-            let total = lines.y + scroll_px.y / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR;
+    let pinch: f32 = pinches.read().map(|p| p.0).sum();
+    if ctrl {
+        // On Wayland/X11 a trackpad pinch is synthesized as Ctrl+Pixel-wheel:
+        // Pixel deltas (~a few px per tick) become the zoom energy, Line
+        // deltas (real stepped wheels held with Ctrl) stay step-like.
+        let pixel_part = if saw_pixel_wheel {
+            scroll_px.y / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR
+        } else {
+            0.0
+        };
+        let total = lines.y + pixel_part + pinch;
+        if total != 0.0 {
             let zoom = doc.zoom * (total * WHEEL_ZOOM_SPEED).exp();
-            set_zoom(&mut doc, zoom);
-        } else if let Ok(mut pos) = scroll.single_mut() {
-            // Wheel-up (positive y) shows earlier content: move the viewport up.
+            apply_display_zoom(&mut doc, zoom, &mut page_nodes);
+        }
+        // Swallow the scroll too: a pinching hand also drifts, and feeding
+        // that drift into the viewport fights the zoom.
+        scroll_px = Vec2::ZERO;
+        lines = Vec2::ZERO;
+    } else if pinch != 0.0 {
+        // macOS/iOS native gesture (winit never emits this on Linux).
+        let zoom = doc.zoom * (pinch * WHEEL_ZOOM_SPEED).exp();
+        apply_display_zoom(&mut doc, zoom, &mut page_nodes);
+    }
+    if lines != Vec2::ZERO || scroll_px != Vec2::ZERO {
+        // Wheel-up (positive y) shows earlier content: move the viewport up.
+        if let Ok(mut pos) = scroll.single_mut() {
             pos.0 -= scroll_px + lines * LINE_SCROLL_PX;
         }
     }
 }
 
 /// Keep fit-to-width live while the user hasn't taken over zoom.
-fn auto_fit(windows: Query<&Window, With<PrimaryWindow>>, mut doc: ResMut<Doc>) {
+fn auto_fit(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut doc: ResMut<Doc>,
+    mut page_nodes: Query<(&mut Node, &mut ImageNode), With<PageImage>>,
+) {
     if doc.manual_zoom {
         return;
     }
     if let Ok(window) = windows.single() {
         let zoom = fit_zoom(window.width(), doc.native_w);
         if (zoom - doc.zoom).abs() > 0.0005 {
-            doc.zoom = zoom;
-            doc.dpi = render_dpi(zoom);
+            apply_display_zoom(&mut doc, zoom, &mut page_nodes);
         }
+    }
+}
+
+/// Commit a debounced re-raster once the display zoom settles.
+///
+/// Runs before [`refresh`]: accumulates idle time and, once the zoom has sat
+/// still for [`RERASTER_DELAY`] and drifted past [`RERASTER_BAND`], snapshots
+/// the display zoom into `dpi`. [`refresh`] then performs the actual render.
+fn maybe_reraster(time: Res<Time>, mut doc: ResMut<Doc>) {
+    doc.zoom_idle += time.delta_secs();
+    if doc.zoom_idle < RERASTER_DELAY {
+        return;
+    }
+    let drift = (doc.zoom - doc.rendered_zoom).abs() / doc.rendered_zoom.max(0.001);
+    if drift > RERASTER_BAND {
+        doc.dpi = render_dpi(doc.zoom);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn refresh(
-    doc: Res<Doc>,
+    mut doc: ResMut<Doc>,
     mut images: ResMut<Assets<Image>>,
     mut page_nodes: Query<(&mut Node, &mut ImageNode), With<PageImage>>,
     mut hud: Query<&mut Text, With<HudText>>,
 ) {
-    if !doc.is_changed() {
-        return;
-    }
-    if let Some(image) = (doc.render)(doc.page, doc.dpi)
+    let need_raster = doc.page != doc.rendered_page || doc.dpi != doc.rendered_dpi;
+    if need_raster
+        && let Some(image) = (doc.render)(doc.page, doc.dpi)
         && let Some(mut slot) = images.get_mut(&doc.image)
     {
+        (doc.tex_w, doc.tex_h) = (image.width(), image.height());
+        doc.rendered_page = doc.page;
+        doc.rendered_dpi = doc.dpi;
+        doc.rendered_zoom = doc.zoom;
         let (w, h) = display_size(image.width(), image.height(), doc.zoom, doc.dpi);
         *slot = image;
         for (mut node, _) in &mut page_nodes {
             node.width = Val::Px(w);
             node.height = Val::Px(h);
         }
+    } else if doc.is_changed() {
+        // Display-only change (per-tick zoom Node resize is already done in
+        // the input systems); keep the HUD in sync.
+    } else {
+        return;
     }
     for mut text in &mut hud {
         text.0 = hud_line(&doc);
