@@ -4,12 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["pdf-hayro"]
+default = ["pdf-hayro", "docx-rdocx"]
 pdf-hayro = ["dep:hayro"]
 pdf-zpdf = ["dep:zpdf"]
+docx-rdocx = ["dep:rdocx"]
 
 [dependencies]
 bevy = "0.19.1"
 image = "0.25"
 hayro = { version = "0.7", optional = true }
 zpdf = { version = "0.13", optional = true }
+rdocx = { version = "0.13", optional = true, default-features = false }
+
+[dev-dependencies]
+rdocx = { version = "0.13", default-features = false }
