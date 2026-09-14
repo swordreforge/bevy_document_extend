@@ -1,3 +1,5 @@
+#![cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
+
 use bevy_document_extend::{PdfError, available_backends, probe, rasterize_page};
 
 #[test]

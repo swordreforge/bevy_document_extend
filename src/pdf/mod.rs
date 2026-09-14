@@ -11,9 +11,6 @@ pub use backend::RasterBackend;
 pub use bevy_image::to_bevy_image;
 pub use types::{DocMetadata, ImageBuffer, PdfError};
 
-#[cfg(not(any(feature = "pdf-hayro", feature = "pdf-zpdf")))]
-compile_error!("enable at least one pdf backend: `pdf-hayro` or `pdf-zpdf`");
-
 #[allow(clippy::vec_init_then_push)]
 pub fn available_backends() -> Vec<&'static str> {
     let mut names = Vec::new();

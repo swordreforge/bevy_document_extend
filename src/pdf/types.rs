@@ -1,16 +1,11 @@
 use std::fmt;
 
+pub use crate::common::ImageBuffer;
+
 #[derive(Debug, Clone)]
 pub struct DocMetadata {
     pub pages: usize,
     pub version: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ImageBuffer {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,18 +39,7 @@ impl std::error::Error for PdfError {}
 
 impl ImageBuffer {
     pub fn to_dynamic(&self) -> Result<image::DynamicImage, PdfError> {
-        let expected = self.width as usize * self.height as usize * 4;
-        if self.rgba.len() != expected {
-            return Err(PdfError::Image(format!(
-                "rgba length {} does not match {}x{}",
-                self.rgba.len(),
-                self.width,
-                self.height
-            )));
-        }
-        let img = image::RgbaImage::from_raw(self.width, self.height, self.rgba.clone())
-            .ok_or_else(|| PdfError::Image("invalid rgba dimensions".to_string()))?;
-        Ok(image::DynamicImage::ImageRgba8(img))
+        self.to_dynamic_raw().map_err(PdfError::Image)
     }
 }
 

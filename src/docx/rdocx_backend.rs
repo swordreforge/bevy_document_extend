@@ -1,6 +1,6 @@
 use super::backend::DocxBackend;
 use super::types::{DocxError, DocxMetadata, check_dpi, check_input};
-use crate::pdf::ImageBuffer;
+use crate::common::ImageBuffer;
 
 pub struct RdocxBackend;
 

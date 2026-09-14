@@ -1,5 +1,5 @@
 use super::types::{DocxError, DocxMetadata};
-use crate::pdf::ImageBuffer;
+use crate::common::ImageBuffer;
 
 pub trait DocxBackend: Send + Sync + 'static {
     fn name(&self) -> &'static str;

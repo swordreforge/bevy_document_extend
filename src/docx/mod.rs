@@ -7,9 +7,6 @@ pub mod rdocx_backend;
 pub use backend::DocxBackend;
 pub use types::{DocxError, DocxMetadata};
 
-#[cfg(not(any(feature = "docx-rdocx")))]
-compile_error!("enable at least one docx backend: `docx-rdocx`");
-
 #[allow(clippy::vec_init_then_push)]
 pub fn available_backends() -> Vec<&'static str> {
     let mut names = Vec::new();
@@ -37,7 +34,7 @@ pub fn rasterize_page(
     docx: &[u8],
     page: usize,
     dpi: u32,
-) -> Result<crate::pdf::ImageBuffer, DocxError> {
+) -> Result<crate::common::ImageBuffer, DocxError> {
     default_backend().rasterize_page(docx, page, dpi)
 }
 
@@ -47,7 +44,7 @@ pub fn rasterize_page_to_bevy(
     dpi: u32,
 ) -> Result<bevy::image::Image, DocxError> {
     let buffer = rasterize_page(docx, page, dpi)?;
-    crate::pdf::to_bevy_image(&buffer).map_err(|e| DocxError::Image(e.to_string()))
+    crate::common::to_bevy_image(&buffer).map_err(DocxError::Image)
 }
 
 pub fn extract_text(docx: &[u8]) -> Result<String, DocxError> {

@@ -5,8 +5,10 @@ edition = "2024"
 
 [features]
 default = ["pdf-hayro", "docx-rdocx"]
+pdf = ["pdf-hayro"]
 pdf-hayro = ["dep:hayro"]
 pdf-zpdf = ["dep:zpdf"]
+docx = ["docx-rdocx"]
 docx-rdocx = ["dep:rdocx"]
 
 [dependencies]

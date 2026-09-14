@@ -1,3 +1,5 @@
+#![cfg(feature = "docx-rdocx")]
+
 use bevy_document_extend::docx::DocxError;
 use bevy_document_extend::docx::{available_backends, extract_text, probe, rasterize_page};
 
