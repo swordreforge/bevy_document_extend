@@ -1,0 +1,37 @@
+[package]
+name = "oxml-layout"
+description = "Format-neutral OOXML layout output and font primitives"
+readme = "README.md"
+version = "0.11.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = true
+include = [
+    "src/**/*",
+    "fonts/*.ttf",
+    "fonts/LICENSE-*",
+    "fonts/NOTICE-*",
+    "fonts/SUBSET-*.md",
+]
+
+[package.metadata.release]
+shared-version = "incubating"
+tag-name = "rpptx-v{{version}}"
+
+[features]
+default = ["system-fonts"]
+system-fonts = ["fontdb/fs", "fontdb/fontconfig"]
+
+[dependencies]
+thiserror = { workspace = true }
+fontdb = { version = "0.23", default-features = false, features = ["std"] }
+harfrust = { workspace = true }
+hypher = { workspace = true }
+icu_segmenter = { workspace = true }
+ttf-parser = { workspace = true }
+unicode-bidi = { workspace = true }
+unicode-linebreak = { workspace = true }

@@ -4,12 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["pdf-hayro", "docx-rdocx"]
+default = ["pdf-hayro", "docx-rdocx", "xlsx-calamine-office2pdf"]
 pdf = ["pdf-hayro"]
 pdf-hayro = ["dep:hayro"]
 pdf-zpdf = ["dep:zpdf"]
 docx = ["docx-rdocx"]
 docx-rdocx = ["dep:rdocx"]
+xlsx = ["xlsx-calamine-office2pdf"]
+xlsx-calamine = ["dep:calamine"]
+xlsx-office2pdf = ["dep:office2pdf"]
+xlsx-calamine-office2pdf = ["xlsx-calamine", "xlsx-office2pdf"]
 
 [dependencies]
 bevy = "0.19.1"
@@ -17,6 +21,12 @@ image = "0.25"
 hayro = { version = "0.7", optional = true }
 zpdf = { version = "0.13", optional = true }
 rdocx = { version = "0.13", optional = true, default-features = false }
+calamine = { version = "0.36", optional = true }
+office2pdf = { version = "0.7", optional = true, default-features = false }
 
 [dev-dependencies]
 rdocx = { version = "0.13", default-features = false }
+rust_xlsxwriter = "0.99"
+
+[patch.crates-io]
+oxml-layout = { path = "patches/oxml-layout" }

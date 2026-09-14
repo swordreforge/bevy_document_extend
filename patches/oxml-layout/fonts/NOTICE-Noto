@@ -1,0 +1,15 @@
+The Noto font files bundled by oxml-layout are distributed under the SIL Open
+Font License 1.1 in LICENSE-Noto.
+
+Upstream project: https://github.com/google/fonts
+Upstream revision: main, retrieved 2026-08-26
+
+Source file SHA-256 values:
+
+- NotoSansArabic[wdth,wght].ttf: 63111b5b2e074dd48cc67692e0a2726d86ee94c1c37fe8598257b7b4e87e869e
+- NotoSansDevanagari[wdth,wght].ttf: 9ce7b04f60e363d8870e5997744cf85cf69d38a4d7d129d364d92a3b14b461d7
+- NotoSansThai[wdth,wght].ttf: 5a1c559bb539583c8a1fd99d1c5b9491e5e14478c9cd2bd0970d5c3096cc9ef8
+- NotoSansSC[wght].ttf: a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da
+
+The Noto Sans SC file in this package is a deterministic subset. Its exact
+reproduction command and repertoire are recorded in SUBSET-NotoSansSC.md.
