@@ -16,9 +16,10 @@ mod app {
     }
 
     pub fn run() {
-        let path = std::env::args()
-            .nth(1)
-            .expect("usage: pdf_viewer <file.pdf> [page] [dpi]");
+        let path = std::env::args().nth(1).unwrap_or_else(|| {
+            "tests/exp/pdf/researcher-paper-意向残余、淤积动力学与节点涌现：本原信息的一种形式理论.pdf"
+                .to_string()
+        });
         let page = std::env::args()
             .nth(2)
             .and_then(|s| s.parse().ok())

@@ -18,7 +18,7 @@ mod app {
     pub fn run() {
         let path = std::env::args()
             .nth(1)
-            .expect("usage: docx_viewer <file.docx> [page] [dpi]");
+            .unwrap_or_else(|| "tests/exp/docx/sample3.docx".to_string());
         let page = std::env::args()
             .nth(2)
             .and_then(|s| s.parse().ok())

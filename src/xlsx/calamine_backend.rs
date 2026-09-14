@@ -1,22 +1,31 @@
 use super::backend::XlsxBackend;
 use super::types::{XlsxError, XlsxMetadata, check_dpi, check_input};
 use crate::common::ImageBuffer;
-use calamine::{Reader, Xlsx};
-use std::io::Cursor;
+use calamine::{Reader, Sheets};
+use std::io::{Cursor, Read, Seek};
 
 pub struct CalamineOfficeBackend;
 
 impl CalamineOfficeBackend {
-    fn workbook(xlsx: &[u8]) -> Result<Xlsx<Cursor<Vec<u8>>>, XlsxError> {
-        check_input(xlsx)?;
-        let cursor = Cursor::new(xlsx.to_vec());
-        Xlsx::new(cursor).map_err(|e| XlsxError::Parse(format!("{e:?}")))
+    fn workbook<RS>(xlsx: RS) -> Result<Sheets<RS>, XlsxError>
+    where
+        RS: Clone + Read + Seek,
+    {
+        calamine::open_workbook_auto_from_rs(xlsx).map_err(|e| XlsxError::Parse(format!("{e:?}")))
     }
 
-    fn sheet_range(
-        workbook: &mut Xlsx<Cursor<Vec<u8>>>,
+    fn workbook_from_bytes(xlsx: &[u8]) -> Result<Sheets<Cursor<Vec<u8>>>, XlsxError> {
+        check_input(xlsx)?;
+        Self::workbook(Cursor::new(xlsx.to_vec()))
+    }
+
+    fn sheet_range<RS>(
+        workbook: &mut Sheets<RS>,
         sheet: Option<&str>,
-    ) -> Result<(String, calamine::Range<calamine::Data>), XlsxError> {
+    ) -> Result<(String, calamine::Range<calamine::Data>), XlsxError>
+    where
+        RS: Clone + Read + Seek,
+    {
         let name = match sheet {
             Some(name) => {
                 if !workbook.sheet_names().contains(&name.to_string()) {
@@ -78,7 +87,7 @@ impl XlsxBackend for CalamineOfficeBackend {
     }
 
     fn probe(&self, xlsx: &[u8]) -> Result<XlsxMetadata, XlsxError> {
-        let mut workbook = Self::workbook(xlsx)?;
+        let mut workbook = Self::workbook_from_bytes(xlsx)?;
         let sheets = workbook.sheet_names();
         let (_, range) = Self::sheet_range(&mut workbook, None)?;
         let (rows, cols) = range.get_size();
@@ -95,11 +104,11 @@ impl XlsxBackend for CalamineOfficeBackend {
     }
 
     fn sheet_names(&self, xlsx: &[u8]) -> Result<Vec<String>, XlsxError> {
-        Ok(Self::workbook(xlsx)?.sheet_names())
+        Ok(Self::workbook_from_bytes(xlsx)?.sheet_names())
     }
 
     fn extract_text(&self, xlsx: &[u8], sheet: Option<&str>) -> Result<String, XlsxError> {
-        let mut workbook = Self::workbook(xlsx)?;
+        let mut workbook = Self::workbook_from_bytes(xlsx)?;
         let (_, range) = Self::sheet_range(&mut workbook, sheet)?;
         let mut lines = Vec::new();
         for row in range.rows() {

@@ -18,7 +18,7 @@ mod app {
     pub fn run() {
         let path = std::env::args()
             .nth(1)
-            .expect("usage: xlsx_viewer <file.xlsx> [page] [dpi]");
+            .unwrap_or_else(|| "tests/exp/xlsx/sample100.xlsx".to_string());
         let page = std::env::args()
             .nth(2)
             .and_then(|s| s.parse().ok())
