@@ -13,7 +13,9 @@ docx-rdocx = ["dep:rdocx"]
 xlsx = ["xlsx-calamine-office2pdf"]
 xlsx-calamine = ["dep:calamine"]
 xlsx-office2pdf = ["dep:office2pdf"]
-xlsx-calamine-office2pdf = ["xlsx-calamine", "xlsx-office2pdf"]
+# Render-only wiring: xlsx -> office2pdf -> pdf -> hayro rasterizer, so
+# `xlsx`/`xlsx-calamine-office2pdf` alone renders out of the box.
+xlsx-calamine-office2pdf = ["xlsx-calamine", "xlsx-office2pdf", "pdf-hayro"]
 
 [dependencies]
 bevy = "0.19.1"

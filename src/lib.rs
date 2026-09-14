@@ -6,7 +6,7 @@ pub mod pdf;
 #[cfg(feature = "docx-rdocx")]
 pub mod docx;
 
-#[cfg(any(feature = "xlsx-calamine", feature = "xlsx-office2pdf"))]
+#[cfg(feature = "xlsx-calamine")]
 pub mod xlsx;
 
 #[cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
