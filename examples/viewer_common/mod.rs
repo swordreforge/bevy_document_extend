@@ -107,7 +107,7 @@ fn setup_ui(mut commands: Commands, doc: Res<Doc>, images: Res<Assets<Image>>) {
                     padding: UiRect::all(Val::Px(12.0)),
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.16, 0.16, 0.18)),
+                BackgroundColor(Color::srgb(0.30, 0.30, 0.33)),
             ))
             .with_children(|viewport| {
                 viewport.spawn((

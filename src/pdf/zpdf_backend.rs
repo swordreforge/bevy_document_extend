@@ -55,6 +55,7 @@ impl RasterBackend for ZpdfBackend {
             width: rendered.width,
             height: rendered.height,
             rgba: rendered.data,
-        })
+        }
+        .flattened_on_white())
     }
 }

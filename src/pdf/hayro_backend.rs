@@ -40,6 +40,7 @@ impl RasterBackend for HayroBackend {
         let settings = hayro::RenderSettings {
             x_scale: scale,
             y_scale: scale,
+            bg_color: hayro::vello_cpu::color::palette::css::WHITE,
             ..Default::default()
         };
         let pixmap = hayro::render(pdf_page, &cache, &Default::default(), &settings);
