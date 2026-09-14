@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(cargo:*)",
+      "Shell(rm:*)",
+      "Shell(grep:*)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

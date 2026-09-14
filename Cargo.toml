@@ -1,0 +1,15 @@
+[package]
+name = "bevy_document_extend"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["pdf-hayro"]
+pdf-hayro = ["dep:hayro"]
+pdf-zpdf = ["dep:zpdf"]
+
+[dependencies]
+bevy = "0.19.1"
+image = "0.25"
+hayro = { version = "0.7", optional = true }
+zpdf = { version = "0.13", optional = true }
