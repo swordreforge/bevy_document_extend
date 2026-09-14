@@ -4,16 +4,13 @@ fn main() {
 }
 
 #[cfg(feature = "xlsx-calamine")]
-mod app {
-    use bevy::prelude::*;
-    use bevy_document_extend::xlsx::{probe, rasterize_page_to_bevy};
+#[path = "viewer_common/mod.rs"]
+mod viewer_common;
 
-    #[derive(Resource)]
-    pub struct DocRequest {
-        pub bytes: Vec<u8>,
-        pub page: usize,
-        pub dpi: u32,
-    }
+#[cfg(feature = "xlsx-calamine")]
+mod app {
+    use super::viewer_common;
+    use bevy_document_extend::xlsx::{page_count, probe, rasterize_page_to_bevy};
 
     pub fn run() {
         let path = std::env::args()
@@ -30,24 +27,18 @@ mod app {
         let bytes = std::fs::read(&path).expect("read xlsx file");
 
         let meta = probe(&bytes).expect("probe xlsx");
-        println!(
-            "{}: sheets {:?}, {}x{} range, {} non-empty cells",
-            path, meta.sheets, meta.rows, meta.cols, meta.non_empty_cells
+        let pages = page_count(&bytes).expect("xlsx page count");
+        let info = format!(
+            "sheets {:?}, {}x{} range, {} non-empty cells",
+            meta.sheets, meta.rows, meta.cols, meta.non_empty_cells
         );
-
-        App::new()
-            .add_plugins(DefaultPlugins)
-            .insert_resource(DocRequest { bytes, page, dpi })
-            .add_systems(Startup, setup)
-            .run();
-    }
-
-    fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, req: Res<DocRequest>) {
-        let image =
-            rasterize_page_to_bevy(&req.bytes, req.page, req.dpi).expect("rasterize xlsx page");
-        let handle = images.add(image);
-        commands.spawn(Camera2d);
-        commands.spawn(Sprite::from_image(handle));
+        println!("{path}: {info}");
+        let page = page.min(pages.max(1) - 1);
+        let bytes_for_render = bytes.clone();
+        let first = rasterize_page_to_bevy(&bytes, page, dpi).expect("rasterize xlsx page");
+        viewer_common::run(path, info, pages, page, dpi, first, move |page, dpi| {
+            rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok()
+        });
     }
 }
 

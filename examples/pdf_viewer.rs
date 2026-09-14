@@ -4,16 +4,13 @@ fn main() {
 }
 
 #[cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
-mod app {
-    use bevy::prelude::*;
-    use bevy_document_extend::{probe, rasterize_page_to_bevy};
+#[path = "viewer_common/mod.rs"]
+mod viewer_common;
 
-    #[derive(Resource)]
-    pub struct DocRequest {
-        pub bytes: Vec<u8>,
-        pub page: usize,
-        pub dpi: u32,
-    }
+#[cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
+mod app {
+    use super::viewer_common;
+    use bevy_document_extend::{probe, rasterize_page_to_bevy};
 
     pub fn run() {
         let path = std::env::args().nth(1).unwrap_or_else(|| {
@@ -31,21 +28,20 @@ mod app {
         let bytes = std::fs::read(&path).expect("read pdf file");
 
         let meta = probe(&bytes).expect("probe pdf");
-        println!("{}: {} pages, version {}", path, meta.pages, meta.version);
-
-        App::new()
-            .add_plugins(DefaultPlugins)
-            .insert_resource(DocRequest { bytes, page, dpi })
-            .add_systems(Startup, setup)
-            .run();
-    }
-
-    fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, req: Res<DocRequest>) {
-        let image =
-            rasterize_page_to_bevy(&req.bytes, req.page, req.dpi).expect("rasterize pdf page");
-        let handle = images.add(image);
-        commands.spawn(Camera2d);
-        commands.spawn(Sprite::from_image(handle));
+        let info = format!("{} pages, version {}", meta.pages, meta.version);
+        println!("{path}: {info}");
+        let page = page.min(meta.pages.max(1) - 1);
+        let bytes_for_render = bytes.clone();
+        let first = rasterize_page_to_bevy(&bytes, page, dpi).expect("rasterize pdf page");
+        viewer_common::run(
+            path,
+            info,
+            meta.pages,
+            page,
+            dpi,
+            first,
+            move |page, dpi| rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok(),
+        );
     }
 }
 
