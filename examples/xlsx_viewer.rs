@@ -24,6 +24,7 @@ mod app {
             .nth(3)
             .and_then(|s| s.parse().ok())
             .unwrap_or(150);
+        let fit = std::env::args().nth(3).is_none();
         let bytes = std::fs::read(&path).expect("read xlsx file");
 
         let meta = probe(&bytes).expect("probe xlsx");
@@ -36,9 +37,16 @@ mod app {
         let page = page.min(pages.max(1) - 1);
         let bytes_for_render = bytes.clone();
         let first = rasterize_page_to_bevy(&bytes, page, dpi).expect("rasterize xlsx page");
-        viewer_common::run(path, info, pages, page, dpi, first, move |page, dpi| {
-            rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok()
-        });
+        viewer_common::run(
+            path,
+            info,
+            pages,
+            page,
+            dpi,
+            fit,
+            first,
+            move |page, dpi| rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok(),
+        );
     }
 }
 

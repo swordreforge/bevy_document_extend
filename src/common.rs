@@ -17,7 +17,8 @@ impl ImageBuffer {
     /// untouched.
     pub fn flattened_on_white(&self) -> Self {
         let mut rgba = Vec::with_capacity(self.rgba.len());
-        for px in self.rgba.chunks_exact(4) {
+        let (chunks, _) = self.rgba.as_chunks::<4>();
+        for px in chunks {
             let (r, g, b, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
             if a == 255 {
                 rgba.extend_from_slice(px);

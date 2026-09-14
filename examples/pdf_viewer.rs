@@ -25,6 +25,7 @@ mod app {
             .nth(3)
             .and_then(|s| s.parse().ok())
             .unwrap_or(150);
+        let fit = std::env::args().nth(3).is_none();
         let bytes = std::fs::read(&path).expect("read pdf file");
 
         let meta = probe(&bytes).expect("probe pdf");
@@ -39,6 +40,7 @@ mod app {
             meta.pages,
             page,
             dpi,
+            fit,
             first,
             move |page, dpi| rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok(),
         );
