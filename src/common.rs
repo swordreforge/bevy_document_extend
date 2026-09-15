@@ -1,4 +1,6 @@
+#[cfg(feature = "render")]
 use bevy::asset::RenderAssetUsages;
+#[cfg(feature = "render")]
 use bevy::image::{Image, ImageSampler, ImageSamplerDescriptor};
 
 #[derive(Debug, Clone)]
@@ -52,6 +54,7 @@ impl ImageBuffer {
     }
 }
 
+#[cfg(feature = "render")]
 pub fn to_bevy_image(buffer: &ImageBuffer) -> Result<Image, String> {
     let dynamic = buffer.to_dynamic_raw()?;
     let mut image = Image::from_dynamic(

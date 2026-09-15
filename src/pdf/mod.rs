@@ -1,4 +1,5 @@
 pub mod backend;
+#[cfg(feature = "render")]
 pub mod bevy_image;
 pub mod types;
 
@@ -8,6 +9,7 @@ pub mod hayro_backend;
 pub mod zpdf_backend;
 
 pub use backend::RasterBackend;
+#[cfg(feature = "render")]
 pub use bevy_image::to_bevy_image;
 pub use types::{DocMetadata, ImageBuffer, PdfError};
 
@@ -47,5 +49,13 @@ pub fn rasterize_page_to_bevy(
     page: usize,
     dpi: u32,
 ) -> Result<bevy::image::Image, PdfError> {
-    to_bevy_image(&rasterize_page(pdf, page, dpi)?)
+    #[cfg(feature = "render")]
+    {
+        to_bevy_image(&rasterize_page(pdf, page, dpi)?)
+    }
+    #[cfg(not(feature = "render"))]
+    {
+        let _ = (pdf, page);
+        Err(PdfError::NoBackend)
+    }
 }
