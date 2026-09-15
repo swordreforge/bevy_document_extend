@@ -7,9 +7,18 @@ use bevy::prelude::*;
 ///
 /// Demo/prototype sugar; see [`crate::view_pdf`] for the contract.
 /// Production code should use [`DocumentViewerPlugin`] + `AssetServer` directly.
+///
+/// The optional `show_hud` toggles the bottom info bar (on by default);
+/// `--no-hud` on the command line overrides it.
 pub fn view_docx(default_path: impl Into<String>) -> impl Plugin {
+    view_docx_with(default_path, true)
+}
+
+/// [`view_docx`] with an explicit info-bar choice.
+pub fn view_docx_with(default_path: impl Into<String>, show_hud: bool) -> impl Plugin {
     struct DocxViewer {
         default_path: String,
+        show_hud: bool,
     }
 
     impl Plugin for DocxViewer {
@@ -29,6 +38,8 @@ pub fn view_docx(default_path: impl Into<String>) -> impl Plugin {
             let bytes_for_render = bytes.clone();
             let first = crate::docx::rasterize_page_to_bevy(&bytes, page, args.dpi)
                 .expect("rasterize docx page");
+            // `--no-hud` on the command line overrides the builder default.
+            let show_hud = !ViewerArgs::has_flag("--no-hud") && self.show_hud;
             app.add_plugins(DocumentViewerPlugin {
                 title: args.path,
                 probe: info,
@@ -36,6 +47,7 @@ pub fn view_docx(default_path: impl Into<String>) -> impl Plugin {
                 page,
                 dpi: args.dpi,
                 fit: args.fit,
+                show_hud,
             });
             app.insert_resource(DocumentSource::new(first, move |page, dpi| {
                 crate::docx::rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok()
@@ -45,5 +57,6 @@ pub fn view_docx(default_path: impl Into<String>) -> impl Plugin {
 
     DocxViewer {
         default_path: default_path.into(),
+        show_hud,
     }
 }

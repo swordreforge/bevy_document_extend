@@ -18,15 +18,15 @@ mod pdf_viewer;
 mod xlsx_viewer;
 
 #[cfg(feature = "docx-rdocx")]
-pub use docx_viewer::view_docx;
+pub use docx_viewer::{view_docx, view_docx_with};
 #[cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
 pub use pdf::{
     DocMetadata, ImageBuffer, PdfError, RasterBackend, available_backends, default_backend, probe,
     rasterize_page, rasterize_page_to_bevy,
 };
 #[cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
-pub use pdf_viewer::view_pdf;
+pub use pdf_viewer::{view_pdf, view_pdf_with};
 #[cfg(feature = "xlsx-calamine")]
-pub use xlsx_viewer::view_xlsx;
+pub use xlsx_viewer::{view_xlsx, view_xlsx_with};
 
-pub use viewer::{DocumentSource, DocumentViewerPlugin, ViewerArgs};
+pub use viewer::{DocumentSource, DocumentViewerPlugin, ViewerArgs, ViewerOptions};

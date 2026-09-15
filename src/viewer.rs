@@ -5,8 +5,12 @@
 //! it. It spawns the page viewport, HUD bar, input systems and debounced
 //! re-raster wiring for you.
 //!
-//! Layout: full-window scrollable page image, bottom HUD bar with the probe
-//! line plus `←/→ page · wheel/pinch scroll · Ctrl+wheel/pinch zoom · ↑/↓ zoom · 0 fit · Q quit`.
+//! Layout: full-window scrollable page image, optional bottom HUD bar with
+//! the probe line plus `[Left]/[Right] page, wheel scroll, Ctrl+wheel/pinch
+//! zoom, [Up]/[Down] zoom, 0 fit, Q quit` (see [`DocumentViewerPlugin::show_hud`]).
+//!
+//! HUD text uses ASCII separators only, so it renders under the default font
+//! in any locale.
 //!
 //! Input routing: plain wheel scrolls the viewport; `Ctrl+wheel` zooms (this
 //! is how Wayland/X11 synthesize trackpad pinch — the compositor sends wheel
@@ -107,6 +111,14 @@ impl ViewerArgs {
         }
     }
 
+    /// True when the raw command line contains `flag` (e.g. `--no-hud`).
+    ///
+    /// Used for boolean toggles that have no positional slot, mirroring the
+    /// `--fit` / `--no-fit` handling in [`ViewerArgs::parse`].
+    pub fn has_flag(flag: &str) -> bool {
+        std::env::args().skip(1).any(|a| a == flag)
+    }
+
     /// Read `self.path` into memory, panicking with the path on failure.
     ///
     /// Example-oriented helper: viewers always need the raw bytes for
@@ -140,6 +152,7 @@ impl ViewerArgs {
 ///             page: 0,
 ///             dpi: 150,
 ///             fit: true,
+///             show_hud: true,
 ///         },
 ///     ))
 ///     .insert_resource(DocumentSource::new(load_first_page(), render_page))
@@ -152,6 +165,10 @@ pub struct DocumentViewerPlugin {
     pub page: usize,
     pub dpi: u32,
     pub fit: bool,
+    /// Show the bottom info bar (title, probe line, page, dpi, zoom, keys).
+    /// Defaults to `true`; set `false` for a chromeless embedded page view.
+    /// [`ViewerOptions::without_hud`] builds the plugin with it off.
+    pub show_hud: bool,
 }
 
 impl Plugin for DocumentViewerPlugin {
@@ -165,6 +182,7 @@ impl Plugin for DocumentViewerPlugin {
                 page,
                 dpi: self.dpi,
                 fit: self.fit,
+                show_hud: self.show_hud,
             })
             .add_systems(Startup, setup_from_source)
             .add_systems(
@@ -172,6 +190,50 @@ impl Plugin for DocumentViewerPlugin {
                 (navigate, auto_fit, wheel, maybe_reraster, refresh).chain(),
             )
             .add_systems(PostUpdate, reanchor_scroll.after(UiSystems::Layout));
+    }
+}
+
+/// Convenience constructors over [`DocumentViewerPlugin`] so callers don't
+/// repeat the full struct literal. Defaults mirror the plugin fields
+/// (`fit: true`, `show_hud: true`, `page: 0`); [`ViewerOptions::without_hud`]
+/// flips the info bar off for embedded use.
+///
+/// ```no_run
+/// use bevy::prelude::*;
+/// use bevy_document_extend::viewer::ViewerOptions;
+///
+/// App::new()
+///     .add_plugins((DefaultPlugins, ViewerOptions::basic("a.pdf", "1 pages", 1)))
+///     .run();
+/// ```
+pub struct ViewerOptions;
+
+impl ViewerOptions {
+    pub fn basic(
+        title: impl Into<String>,
+        probe: impl Into<String>,
+        pages: usize,
+    ) -> DocumentViewerPlugin {
+        DocumentViewerPlugin {
+            title: title.into(),
+            probe: probe.into(),
+            pages,
+            page: 0,
+            dpi: 150,
+            fit: true,
+            show_hud: true,
+        }
+    }
+
+    pub fn without_hud(
+        title: impl Into<String>,
+        probe: impl Into<String>,
+        pages: usize,
+    ) -> DocumentViewerPlugin {
+        DocumentViewerPlugin {
+            show_hud: false,
+            ..Self::basic(title, probe, pages)
+        }
     }
 }
 
@@ -187,6 +249,7 @@ struct ViewerConfig {
     page: usize,
     dpi: u32,
     fit: bool,
+    show_hud: bool,
 }
 
 /// Builds viewer state from [`ViewerConfig`] + [`DocumentSource`].
@@ -248,7 +311,7 @@ fn setup_from_source(
         dpi,
         zoom,
     };
-    setup_ui(commands, &doc, image, w, h);
+    setup_ui(commands, &doc, image, w, h, config.show_hud);
 }
 
 /// Minimal snapshot for HUD text — implemented for both the [`setup_ui`]
@@ -378,8 +441,11 @@ impl HudState for ResMut<'_, Doc> {
 }
 
 fn hud_line(doc: &(impl HudState + ?Sized)) -> String {
+    // ASCII separators only: the HUD text must render under the default font
+    // in any locale. Non-ASCII separators (middle dot, em dash, CJK arrows)
+    // fall back to tofu boxes when the system font lacks those glyphs.
     format!(
-        "{} — {} · page {}/{} · {}dpi · {:.0}% · ←/→ page · wheel scroll · Ctrl+wheel/pinch zoom · ↑/↓ zoom · 0 fit · Q quit",
+        "{}, {}, page {}/{}, {}dpi, {:.0}%, [Left]/[Right] page, wheel scroll, Ctrl+wheel/pinch zoom, [Up]/[Down] zoom, 0 fit, Q quit",
         doc.title(),
         doc.probe(),
         doc.page() + 1,
@@ -570,6 +636,7 @@ fn setup_ui(
     image: Handle<Image>,
     w: f32,
     h: f32,
+    show_hud: bool,
 ) {
     commands.spawn(Camera2d);
     commands
@@ -621,6 +688,11 @@ fn setup_ui(
                 Node {
                     width: Val::Percent(100.0),
                     padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+                    display: if show_hud {
+                        Display::Flex
+                    } else {
+                        Display::None
+                    },
                     ..default()
                 },
                 BackgroundColor(Color::srgb(0.08, 0.08, 0.10)),

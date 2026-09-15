@@ -7,9 +7,18 @@ use bevy::prelude::*;
 ///
 /// Demo/prototype sugar; see [`crate::view_pdf`] for the contract.
 /// Production code should use [`DocumentViewerPlugin`] + `AssetServer` directly.
+///
+/// The optional `show_hud` toggles the bottom info bar (on by default);
+/// `--no-hud` on the command line overrides it.
 pub fn view_xlsx(default_path: impl Into<String>) -> impl Plugin {
+    view_xlsx_with(default_path, true)
+}
+
+/// [`view_xlsx`] with an explicit info-bar choice.
+pub fn view_xlsx_with(default_path: impl Into<String>, show_hud: bool) -> impl Plugin {
     struct XlsxViewer {
         default_path: String,
+        show_hud: bool,
     }
 
     impl Plugin for XlsxViewer {
@@ -30,6 +39,8 @@ pub fn view_xlsx(default_path: impl Into<String>) -> impl Plugin {
             let bytes_for_render = bytes.clone();
             let first = crate::xlsx::rasterize_page_to_bevy(&bytes, page, args.dpi)
                 .expect("rasterize xlsx page");
+            // `--no-hud` on the command line overrides the builder default.
+            let show_hud = !ViewerArgs::has_flag("--no-hud") && self.show_hud;
             app.add_plugins(DocumentViewerPlugin {
                 title: args.path,
                 probe: info,
@@ -37,6 +48,7 @@ pub fn view_xlsx(default_path: impl Into<String>) -> impl Plugin {
                 page,
                 dpi: args.dpi,
                 fit: args.fit,
+                show_hud,
             });
             app.insert_resource(DocumentSource::new(first, move |page, dpi| {
                 crate::xlsx::rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok()
@@ -46,5 +58,6 @@ pub fn view_xlsx(default_path: impl Into<String>) -> impl Plugin {
 
     XlsxViewer {
         default_path: default_path.into(),
+        show_hud,
     }
 }

@@ -21,9 +21,23 @@ use bevy::prelude::*;
 ///
 /// Production code should use [`DocumentViewerPlugin`] + `AssetServer`
 /// directly instead of this fs-reading shortcut.
+/// The optional `show_hud` toggles the bottom info bar (on by default).
+/// Pass `--no-hud` on the command line, or call
+/// [`ViewerOptions::without_hud`](crate::viewer::ViewerOptions::without_hud)
+/// when composing the plugin by hand.
 pub fn view_pdf(default_path: impl Into<String>) -> impl Plugin {
+    view_pdf_with(default_path, true)
+}
+
+/// [`view_pdf`] with an explicit info-bar choice.
+///
+/// Follows the same builder-with-options shape as Bevy's own plugins
+/// (e.g. `DefaultPlugins.set(...)`): the plain function keeps the one-line
+/// call, this one exposes the knob.
+pub fn view_pdf_with(default_path: impl Into<String>, show_hud: bool) -> impl Plugin {
     struct PdfViewer {
         default_path: String,
+        show_hud: bool,
     }
 
     impl Plugin for PdfViewer {
@@ -40,6 +54,8 @@ pub fn view_pdf(default_path: impl Into<String>) -> impl Plugin {
             let bytes_for_render = bytes.clone();
             let first =
                 crate::rasterize_page_to_bevy(&bytes, page, args.dpi).expect("rasterize pdf page");
+            // `--no-hud` on the command line overrides the builder default.
+            let show_hud = !ViewerArgs::has_flag("--no-hud") && self.show_hud;
             app.add_plugins(DocumentViewerPlugin {
                 title: args.path,
                 probe: info,
@@ -47,6 +63,7 @@ pub fn view_pdf(default_path: impl Into<String>) -> impl Plugin {
                 page,
                 dpi: args.dpi,
                 fit: args.fit,
+                show_hud,
             });
             app.insert_resource(DocumentSource::new(first, move |page, dpi| {
                 crate::rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok()
@@ -56,5 +73,6 @@ pub fn view_pdf(default_path: impl Into<String>) -> impl Plugin {
 
     PdfViewer {
         default_path: default_path.into(),
+        show_hud,
     }
 }
