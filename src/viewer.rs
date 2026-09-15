@@ -695,19 +695,30 @@ fn reanchor_scroll(
         }
     }
     let max = (total - vis).max(Vec2::ZERO);
-    let out = if doc.anchor_init && (total - doc.anchor_total).abs().max_element() > 0.5 {
-        // Zoom tick: re-center on the viewport-center content point.
+    let out = if !doc.anchor_init && doc.page > 0 {
+        // Opening on a requested start page (`viewer file.pdf 2`): jump
+        // straight there on the first frame instead of opening at the top.
+        Vec2::new(0.0, page_offset_y(&sizes, doc.page).clamp(0.0, max.y))
+    } else if doc.anchor_init && (total - doc.anchor_total).abs().max_element() > 0.5 {
+        // Zoom tick (or a fresh page texture landing): re-center on the
+        // viewport-center content point — except when pinned to an edge.
+        // Without the edge stickiness, opening drifts down a few pixels:
+        // the first `auto_fit` correction grows the column while scroll is
+        // still 0, and center-anchoring pushes scroll to `v*0.5*(ratio-1)`.
         let mut out = Vec2::ZERO;
         for i in 0..2 {
             let v = vis[i].max(1.0);
             let c_new = total[i].max(1.0);
             let c_old = doc.anchor_total[i].max(1.0);
-            let p = if c_old <= v {
-                c_old * 0.5
+            let prev_max = (c_old - v).max(0.0);
+            if doc.anchor_scroll[i] <= 0.5 {
+                out[i] = 0.0;
+            } else if doc.anchor_scroll[i] >= prev_max - 0.5 {
+                out[i] = (c_new - v).max(0.0);
             } else {
-                doc.anchor_scroll[i] + v * 0.5
-            };
-            out[i] = (p * (c_new / c_old) - v * 0.5).clamp(0.0, (c_new - v).max(0.0));
+                let p = doc.anchor_scroll[i] + v * 0.5;
+                out[i] = (p * (c_new / c_old) - v * 0.5).clamp(0.0, (c_new - v).max(0.0));
+            }
         }
         out
     } else {
