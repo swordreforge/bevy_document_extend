@@ -790,6 +790,10 @@ fn wheel(
 }
 
 /// Keep fit-to-width live while the user hasn't taken over zoom.
+///
+/// The render dpi tracks the *physical* pixel density (`scale_factor`), so a
+/// HiDPI/retina display renders at 2x texels instead of GPU-upscaling a 1x
+/// texture — that upscale blur is the main "slightly fuzzy vs browser" gap.
 fn auto_fit(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut doc: ResMut<Doc>,
@@ -800,6 +804,11 @@ fn auto_fit(
     }
     if let Ok(window) = windows.single() {
         let zoom = fit_zoom(window.width(), doc.native_w);
+        let scale = window.scale_factor().max(1.0);
+        let dpi = (render_dpi(zoom) as f32 * scale).round().clamp(36.0, 600.0) as u32;
+        if dpi != doc.dpi {
+            doc.dpi = dpi;
+        }
         if (zoom - doc.zoom).abs() > 0.0005 {
             apply_display_zoom(&mut doc, zoom, &mut page_nodes);
         }
@@ -811,14 +820,26 @@ fn auto_fit(
 /// Runs before [`refresh`]: accumulates idle time and, once the zoom has sat
 /// still for [`RERASTER_DELAY`] and drifted past [`RERASTER_BAND`], snapshots
 /// the display zoom into `dpi`. [`refresh`] then performs the actual render.
-fn maybe_reraster(time: Res<Time>, mut doc: ResMut<Doc>) {
+/// Like [`auto_fit`], dpi is scaled by the window's physical pixel ratio so
+/// the texture matches the display instead of being GPU-upscaled.
+fn maybe_reraster(
+    time: Res<Time>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut doc: ResMut<Doc>,
+) {
     doc.zoom_idle += time.delta_secs();
     if doc.zoom_idle < RERASTER_DELAY {
         return;
     }
     let drift = (doc.zoom - doc.rendered_zoom).abs() / doc.rendered_zoom.max(0.001);
     if drift > RERASTER_BAND {
-        doc.dpi = render_dpi(doc.zoom);
+        let scale = windows
+            .single()
+            .map(|w| w.scale_factor().max(1.0))
+            .unwrap_or(1.0);
+        doc.dpi = (render_dpi(doc.zoom) as f32 * scale)
+            .round()
+            .clamp(36.0, 600.0) as u32;
     }
 }
 

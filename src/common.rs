@@ -59,6 +59,14 @@ pub fn to_bevy_image(buffer: &ImageBuffer) -> Result<Image, String> {
         true,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
+    // Anisotropic filtering keeps downscaled text sharp: at fit-to-width the
+    // page texture is minified (more texels than physical pixels), and the
+    // default `anisotropy_clamp = 1` blurs near-horizontal/vertical glyph
+    // stems. 8x is widely supported and cheap for a single page quad.
+    // (No mipmaps: Bevy `Image` defaults to a single mip level, so the min
+    // filter does the work — the fix is texel density + anisotropy, not mips.)
+    let mut sampler = ImageSamplerDescriptor::linear();
+    sampler.set_anisotropic_filter(8);
+    image.sampler = ImageSampler::Descriptor(sampler);
     Ok(image)
 }
