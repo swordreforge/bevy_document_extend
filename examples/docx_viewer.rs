@@ -4,13 +4,10 @@ fn main() {
 }
 
 #[cfg(feature = "docx-rdocx")]
-#[path = "viewer_common/mod.rs"]
-mod viewer_common;
-
-#[cfg(feature = "docx-rdocx")]
 mod app {
-    use super::viewer_common;
+    use bevy::prelude::*;
     use bevy_document_extend::docx::{probe, rasterize_page_to_bevy};
+    use bevy_document_extend::viewer::{DocumentViewer, DocumentViewerPlugin, RenderCallbackCell};
 
     pub fn run() {
         let path = std::env::args()
@@ -36,16 +33,23 @@ mod app {
         let page = page.min(meta.pages.max(1) - 1);
         let bytes_for_render = bytes.clone();
         let first = rasterize_page_to_bevy(&bytes, page, dpi).expect("rasterize docx page");
-        viewer_common::run(
-            path,
-            info,
-            meta.pages,
-            page,
-            dpi,
-            fit,
-            first,
-            move |page, dpi| rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok(),
-        );
+        App::new()
+            .add_plugins((
+                DefaultPlugins,
+                DocumentViewerPlugin(DocumentViewer {
+                    title: path,
+                    probe: info,
+                    pages: meta.pages,
+                    page,
+                    dpi,
+                    fit,
+                    first,
+                    render: RenderCallbackCell::new(move |page, dpi| {
+                        rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok()
+                    }),
+                }),
+            ))
+            .run();
     }
 }
 

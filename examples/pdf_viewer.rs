@@ -4,13 +4,12 @@ fn main() {
 }
 
 #[cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
-#[path = "viewer_common/mod.rs"]
-mod viewer_common;
-
-#[cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
 mod app {
-    use super::viewer_common;
-    use bevy_document_extend::{probe, rasterize_page_to_bevy};
+    use bevy::prelude::*;
+    use bevy_document_extend::{
+        probe, rasterize_page_to_bevy,
+        viewer::{DocumentViewer, DocumentViewerPlugin, RenderCallbackCell},
+    };
 
     pub fn run() {
         let path = std::env::args().nth(1).unwrap_or_else(|| {
@@ -34,16 +33,23 @@ mod app {
         let page = page.min(meta.pages.max(1) - 1);
         let bytes_for_render = bytes.clone();
         let first = rasterize_page_to_bevy(&bytes, page, dpi).expect("rasterize pdf page");
-        viewer_common::run(
-            path,
-            info,
-            meta.pages,
-            page,
-            dpi,
-            fit,
-            first,
-            move |page, dpi| rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok(),
-        );
+        App::new()
+            .add_plugins((
+                DefaultPlugins,
+                DocumentViewerPlugin(DocumentViewer {
+                    title: path,
+                    probe: info,
+                    pages: meta.pages,
+                    page,
+                    dpi,
+                    fit,
+                    first,
+                    render: RenderCallbackCell::new(move |page, dpi| {
+                        rasterize_page_to_bevy(&bytes_for_render, page, dpi).ok()
+                    }),
+                }),
+            ))
+            .run();
     }
 }
 
