@@ -106,6 +106,15 @@ impl ViewerArgs {
             fit,
         }
     }
+
+    /// Read `self.path` into memory, panicking with the path on failure.
+    ///
+    /// Example-oriented helper: viewers always need the raw bytes for
+    /// `probe` + first-page raster before the [`DocumentViewerPlugin`] can
+    /// be built.
+    pub fn read_bytes(&self) -> Vec<u8> {
+        std::fs::read(&self.path).unwrap_or_else(|e| panic!("read {}: {e}", self.path))
+    }
 }
 
 /// Adds the scrollable document viewer UI to an [`App`](bevy::prelude::App).
