@@ -14,13 +14,33 @@ categories = ["game-engines", "multimedia"]
 
 [features]
 default = ["pdf-hayro", "docx-rdocx", "xlsx-calamine-office2pdf", "pptx-office"]
+# Core render path: probe + rasterize to Bevy `Image`. Pulls only
+# bevy_asset/bevy_image (+ gestures for the input types) — no window, no UI,
+# no renderer. This is what headless/bare-metal users want.
+render = ["dep:bevy", "bevy/bevy_asset", "bevy/bevy_image", "bevy/gestures"]
+# Full viewer shell (`DocumentViewerPlugin` + `view_*`): adds the windowed UI
+# stack (`bevy_window` + `bevy_ui` + `bevy_ui_render`, explicitly listed per
+# the issue — no implicit UI through Bevy defaults) on top of `render`.
+# `bevy_winit` provides the platform event loop + window creation: without it
+# `App::run()` has no runner and exits silently after Startup. `x11`/`wayland`
+# select the Linux window backend (winit compile_errors with neither).
+# Examples enable this explicitly via `required-features`.
+viewer = [
+    "render",
+    "bevy/bevy_window",
+    "bevy/bevy_ui",
+    "bevy/bevy_ui_render",
+    "bevy/bevy_winit",
+    "bevy/x11",
+    "bevy/wayland",
+]
 pdf = ["pdf-hayro"]
-pdf-hayro = ["dep:hayro"]
-pdf-zpdf = ["dep:zpdf"]
+pdf-hayro = ["render", "dep:hayro"]
+pdf-zpdf = ["render", "dep:zpdf"]
 docx = ["docx-rdocx"]
-docx-rdocx = ["dep:rdocx"]
+docx-rdocx = ["render", "dep:rdocx"]
 xlsx = ["xlsx-calamine-office2pdf"]
-xlsx-calamine = ["dep:calamine"]
+xlsx-calamine = ["render", "dep:calamine"]
 xlsx-office2pdf = ["dep:office2pdf"]
 # Render-only wiring: xlsx -> office2pdf -> pdf -> hayro rasterizer, so
 # `xlsx`/`xlsx-calamine-office2pdf` alone renders out of the box.
@@ -28,11 +48,14 @@ xlsx-calamine-office2pdf = ["xlsx-calamine", "xlsx-office2pdf", "pdf-hayro"]
 pptx = ["pptx-office"]
 # Probe/extract use zip+quick-xml directly on the OPC package; render-only
 # wiring: pptx -> office2pdf -> pdf -> hayro rasterizer, mirroring xlsx.
-pptx-office = ["dep:zip", "dep:quick-xml", "pptx-office2pdf", "pdf-hayro"]
+pptx-office = ["render", "dep:zip", "dep:quick-xml", "pptx-office2pdf", "pdf-hayro"]
 pptx-office2pdf = ["dep:office2pdf"]
 
 [dependencies]
-bevy = { version = "0.19.1", features = ["gestures"] }
+# default-features = false: a library must not drag in Bevy's full default
+# stack (2d+3d+ui+audio+...). Callers opt in via `render` (headless) or
+# `viewer` (windowed shell); examples enable `viewer` explicitly.
+bevy = { version = "0.19.1", default-features = false, optional = true }
 image = "0.25"
 hayro = { version = "0.7", optional = true }
 zpdf = { version = "0.13", optional = true }
@@ -45,6 +68,22 @@ quick-xml = { version = "0.41", optional = true }
 [dev-dependencies]
 rdocx = { version = "0.13", default-features = false }
 rust_xlsxwriter = "0.99"
+
+[[example]]
+name = "pdf_viewer"
+required-features = ["viewer", "pdf-hayro"]
+
+[[example]]
+name = "docx_viewer"
+required-features = ["viewer", "docx-rdocx"]
+
+[[example]]
+name = "xlsx_viewer"
+required-features = ["viewer", "xlsx-calamine"]
+
+[[example]]
+name = "pptx_viewer"
+required-features = ["viewer", "pptx-office"]
 
 [patch.crates-io]
 oxml-layout = { path = "patches/oxml-layout" }
