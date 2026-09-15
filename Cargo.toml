@@ -8,6 +8,9 @@ repository = "https://github.com/swordreforge/bevy_document_extend"
 keywords = ["bevy", "pdf", "docx", "xlsx", "render"]
 categories = ["game-engines", "multimedia"]
 
+[lints.cargo]
+manual_readme = "allow" # avoid irrelevant warnings
+
 [features]
 default = ["pdf-hayro", "docx-office", "xlsx-calamine-office2pdf", "pptx-office"]
 # Core render path: probe + rasterize to Bevy `Image`. Pulls only
