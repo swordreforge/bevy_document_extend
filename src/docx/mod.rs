@@ -1,29 +1,36 @@
 pub mod backend;
 pub mod types;
 
-#[cfg(feature = "docx-rdocx")]
-pub mod rdocx_backend;
+#[cfg(feature = "docx-office")]
+pub mod office_backend;
 
 pub use backend::DocxBackend;
 pub use types::{DocxError, DocxMetadata};
 
+#[cfg(feature = "docx-office")]
+pub use office_backend::OfficeDocxBackend;
+
 #[allow(clippy::vec_init_then_push)]
 pub fn available_backends() -> Vec<&'static str> {
     let mut names = Vec::new();
-    #[cfg(feature = "docx-rdocx")]
-    names.push("rdocx");
+    #[cfg(feature = "docx-office")]
+    names.push("office2pdf");
     names
 }
 
 #[allow(unreachable_code)]
 pub fn default_backend() -> Box<dyn DocxBackend> {
-    #[cfg(feature = "docx-rdocx")]
-    return Box::new(rdocx_backend::RdocxBackend);
+    #[cfg(feature = "docx-office")]
+    return Box::new(office_backend::OfficeDocxBackend);
     panic!("no docx backend enabled");
 }
 
 pub fn probe(docx: &[u8]) -> Result<DocxMetadata, DocxError> {
     default_backend().probe(docx)
+}
+
+pub fn to_pdf(docx: &[u8]) -> Result<Vec<u8>, DocxError> {
+    default_backend().to_pdf(docx)
 }
 
 pub fn page_count(docx: &[u8]) -> Result<usize, DocxError> {

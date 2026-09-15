@@ -2,7 +2,6 @@
 
 Pure-Rust document rendering for [Bevy](https://bevyengine.org), backed by
 [`hayro`](https://crates.io/crates/hayro) / [`zpdf`](https://crates.io/crates/zpdf),
-[`rdocx`](https://crates.io/crates/rdocx) and
 [`calamine`](https://crates.io/crates/calamine) + [`office2pdf`](https://crates.io/crates/office2pdf).
 No C, no FFI, no LibreOffice.
 
@@ -10,11 +9,6 @@ Bevy 0.19 has no built-in document support — `bevy_asset` stops at images/audi
 and high-fidelity Office rendering elsewhere usually means linking LibreOfficeKit.
 This crate probes document bytes and rasterizes pages straight into Bevy `Image`
 assets, so the whole pipeline stays pure Rust on **native and wasm**.
-
-> **Alpha note (`0.1.0-alpha.x`):** this crate currently carries a local patch for
-> `oxml-layout 0.11.0` (see `patches/oxml-layout/README.PATCH.md`) fixing a
-> non-exhaustive `fontdb::Source` match. Versions stay pre-release until upstream
-> fixes it; `cargo publish` meanwhile requires `--no-verify`.
 
 ## Features
 
@@ -32,7 +26,7 @@ assets, so the whole pipeline stays pure Rust on **native and wasm**.
 
 ```toml
 [dependencies]
-# Default: hayro (PDF) + rdocx (DOCX) + calamine/office2pdf (XLSX)
+# Default: hayro (PDF) + office2pdf (DOCX) + calamine/office2pdf (XLSX) + office2pdf (PPTX)
 bevy_document_extend = "0.1.0-alpha.0"
 
 # Or pick backends explicitly (default-features = false):
@@ -43,11 +37,14 @@ bevy_document_extend = "0.1.0-alpha.0"
 |---------------------------------|--------|----------------------------|
 | `pdf-hayro` (default)           | PDF    | `hayro` rasterizer         |
 | `pdf-zpdf`                      | PDF    | `zpdf` rasterizer          |
-| `docx-rdocx` (default)          | DOCX   | `rdocx` layout + rasterize |
+| `docx-office` (default)         | DOCX   | `office2pdf` → PDF → `hayro` |
 | `xlsx-calamine-office2pdf` (default) | XLSX | `calamine` read + `office2pdf` → PDF → `hayro` |
+| `pptx-office` (default)         | PPTX   | `office2pdf` → PDF → `hayro` |
 
-The XLSX render path is wiring only: `xlsx -> office2pdf -> pdf -> hayro`, so the
-`xlsx` feature renders out of the box with no extra setup.
+All three Office formats share one render chain (`office -> office2pdf ->
+pdf -> hayro`), so every `*-office*` feature renders out of the box with no
+extra setup. DOCX `probe`/`extract_text` additionally read the OPC package
+directly (`zip` + `quick-xml`), so metadata never pays a conversion.
 
 ## Usage
 
@@ -98,8 +95,9 @@ trackpad pinch, since winit only emits `PinchGesture` on macOS/iOS.)
 - **Types** — e.g. `DocMetadata` / `PdfError`, `DocxMetadata` / `DocxError`,
   `XlsxMetadata` / `XlsxError` in `pdf::types`, `docx::types`, `xlsx::types`.
 - **Backends** — a `RasterBackend` trait (`pdf`) / `DocxBackend` (`docx`) /
-  `XlsxBackend` (`xlsx`) with one struct per dependency (`HayroBackend`,
-  `ZpdfBackend`, `RdocxBackend`, `CalamineOfficeBackend`). `available_backends()`
+  `XlsxBackend` (`xlsx`) / `PptxBackend` (`pptx`) with one struct per
+  dependency (`HayroBackend`, `ZpdfBackend`, `OfficeDocxBackend`,
+  `CalamineOfficeBackend`, `OfficePptxBackend`). `available_backends()`
   and `default_backend()` pick by enabled feature, preferring `hayro` for PDF.
 - **Bevy conversion** — `common::ImageBuffer` (raw RGBA + `flattened_on_white`)
   becomes a Bevy `Image` via `Image::from_dynamic` with

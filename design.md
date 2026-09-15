@@ -8,13 +8,13 @@
 
 | 格式 | 库 | 职责 | 关键能力 |
 |:---|:---|:---|:---|
-| **DOCX** | `rdocx` | 读取、布局、栅格化 | 内置布局引擎，可直接输出 PDF/PNG/HTML/Markdown，PNG 通过 `tiny-skia` 栅格化，支持 WASM |
-| **XLSX** | `office2pdf` | Office 转 PDF | 纯 Rust，基于 Typst，支持 DOCX/XLSX/PPTX 转 PDF，无外部依赖，支持 WASM |
+| **DOCX** | `office2pdf` | Office 转 PDF（DOCX/XLSX/PPTX 统一链）+ `zip`/`quick-xml` 直读 OPC 做 probe/extract | 纯 Rust，基于 Typst，无外部依赖，支持 WASM |
+| **XLSX** | `office2pdf` + `calamine` | Office 转 PDF + 电子表格数据读取 | `calamine` 只读 XLS/XLSX/XLSM/XLSB/ODS；渲染走同一转 PDF 链 |
+| **PPTX** | `office2pdf` | Office 转 PDF | 同上，slide 文本经 `zip`/`quick-xml` 直读 |
 | **PDF** | `zpdf` | PDF 解析与栅格化 | 纯 Rust，CPU（`tiny-skia`）和 GPU（`wgpu`）双渲染后端，PNG 输出支持任意 DPI，输出匹配度 <1% 像素差异 |
 | **PDF（备选）** | `hayro` | PDF 解析与栅格化 | 纯 Rust，支持 PDF 转 PNG/SVG，测试套件覆盖 1400+ PDF |
-| **XLSX（数据提取）** | `calamine` | 电子表格数据读取 | 纯 Rust，只读，支持 XLS/XLSX/XLSM/XLSB/ODS |
 
-> **`rdocx` 与 `office2pdf` 的分工**：`rdocx` 专注 DOCX 的深度处理（编辑、模板替换、合并等），其 PNG 输出是“DOCX 直出”路径；`office2pdf` 覆盖 DOCX/XLSX/PPTX 三种格式的统一转 PDF，是 XLSX 渲染的唯一纯 Rust 路径。两者可根据场景选择或组合使用。
+> **统一 Office 链**：DOCX/XLSX/PPTX 共享 `office -> office2pdf -> pdf -> hayro` 同一渲染链（A/B 实测：office2pdf 与直出布局在保真度上无可见差异，仅换行断词有像素级不同）；`calamine` 负责 XLSX 数据提取，`zip`/`quick-xml` 负责 DOCX/PPTX 的 probe/extract 直读，metadata 永不付转换成本。
 
 ### C 库后端（可选 feature）
 
@@ -46,8 +46,8 @@ default = ["pure-rust"]
 
 # 纯 Rust 后端（无 C 依赖，跨平台，支持 WASM）
 pure-rust = [
-    "dep:rdocx",
     "dep:office2pdf",
+    "dep:calamine",
     "dep:zpdf",
 ]
 
@@ -63,7 +63,6 @@ bevy = { version = "0.14", default-features = false }
 image = "0.25"
 
 # 纯 Rust 后端依赖（可选）
-rdocx = { version = "0.1", optional = true }
 office2pdf = { version = "0.6", optional = true }
 zpdf = { version = "0.4", optional = true }
 calamine = { version = "0.36", optional = true }  # XLSX 数据提取，可选
@@ -107,14 +106,9 @@ impl RasterBackend for PureRustBackend {
     fn rasterize_page(&self, bytes, format, page, dpi) -> Result<ImageBuffer, DocError> {
         match format {
             DocFormat::Pdf => zpdf::render_page_to_image(bytes, page, dpi),
-            DocFormat::Docx => {
-                // 路径 A：rdocx 直出 PNG
-                // 路径 B：office2pdf → PDF → zpdf
-                let pdf = office2pdf::convert(bytes, DocFormat::Docx)?;
-                zpdf::render_page_to_image(&pdf, page, dpi)
-            }
-            DocFormat::Xlsx => {
-                let pdf = office2pdf::convert(bytes, DocFormat::Xlsx)?;
+            // DOCX/XLSX/PPTX 统一走 office2pdf → PDF → zpdf 同一链
+            DocFormat::Docx | DocFormat::Xlsx | DocFormat::Pptx => {
+                let pdf = office2pdf::convert(bytes, format)?;
                 zpdf::render_page_to_image(&pdf, page, dpi)
             }
         }
@@ -137,7 +131,7 @@ impl RasterBackend for LibreOfficeBackend {
 
 ## 💎 总结
 
-**默认路径**（`cargo add bevy_doc_viewer`）：纯 Rust，零 C 依赖，跨平台，支持 WASM。DOCX 走 `rdocx` 或 `office2pdf` → `zpdf`，XLSX 走 `office2pdf` → `zpdf`，PDF 走 `zpdf`。适用于 90% 的常见文档场景。
+**默认路径**（`cargo add bevy_doc_viewer`）：纯 Rust，零 C 依赖，跨平台，支持 WASM。DOCX/XLSX/PPTX 统一走 `office2pdf` → `zpdf` 同一链，PDF 走 `zpdf`。适用于 90% 的常见文档场景。
 
 **可选路径**（`--features libreoffice`）：系统安装 LibreOffice 后启用，获得近乎 100% 的 Office 文档兼容性，适合对保真度要求极高的场景。
 

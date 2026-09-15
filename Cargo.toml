@@ -1,10 +1,6 @@
 [package]
 name = "bevy_document_extend"
-# Pre-release: ships with a local patch for oxml-layout 0.11.0 (see
-# patches/oxml-layout/README.PATCH.md). Until upstream fixes the
-# non-exhaustive fontdb::Source match, `cargo publish` requires
-# `--no-verify` because verification resolves unpatched crates.io deps.
-version = "0.1.0-alpha.0"
+version = "0.2.0"
 edition = "2024"
 description = "Bevy document rendering extensions: rasterize PDF/DOCX/XLSX/PPTX pages to Bevy images"
 license = "MIT OR Apache-2.0"
@@ -13,7 +9,7 @@ keywords = ["bevy", "pdf", "docx", "xlsx", "render"]
 categories = ["game-engines", "multimedia"]
 
 [features]
-default = ["pdf-hayro", "docx-rdocx", "xlsx-calamine-office2pdf", "pptx-office"]
+default = ["pdf-hayro", "docx-office", "xlsx-calamine-office2pdf", "pptx-office"]
 # Core render path: probe + rasterize to Bevy `Image`. Pulls only
 # bevy_asset/bevy_image (+ gestures for the input types) — no window, no UI,
 # no renderer. This is what headless/bare-metal users want.
@@ -37,8 +33,11 @@ viewer = [
 pdf = ["pdf-hayro"]
 pdf-hayro = ["render", "dep:hayro"]
 pdf-zpdf = ["render", "dep:zpdf"]
-docx = ["docx-rdocx"]
-docx-rdocx = ["render", "dep:rdocx"]
+docx = ["docx-office"]
+# Probe/extract use zip+quick-xml directly on the OPC package; render-only
+# wiring: docx -> office2pdf -> pdf -> hayro rasterizer, mirroring xlsx/pptx.
+docx-office = ["render", "dep:zip", "dep:quick-xml", "docx-office2pdf", "pdf-hayro"]
+docx-office2pdf = ["dep:office2pdf"]
 xlsx = ["xlsx-calamine-office2pdf"]
 xlsx-calamine = ["render", "dep:calamine"]
 xlsx-office2pdf = ["dep:office2pdf"]
@@ -59,14 +58,13 @@ bevy = { version = "0.19.1", default-features = false, optional = true }
 image = "0.25"
 hayro = { version = "0.7", optional = true }
 zpdf = { version = "0.13", optional = true }
-rdocx = { version = "0.13", optional = true, default-features = false }
 calamine = { version = "0.36", optional = true }
 office2pdf = { version = "0.7", optional = true, default-features = false }
 zip = { version = "0.6", optional = true, default-features = false, features = ["deflate"] }
 quick-xml = { version = "0.41", optional = true }
 
 [dev-dependencies]
-rdocx = { version = "0.13", default-features = false }
+docx_rs = { version = "0.4.22", package = "docx-rs" }
 rust_xlsxwriter = "0.99"
 
 [[example]]
@@ -75,7 +73,7 @@ required-features = ["viewer", "pdf-hayro"]
 
 [[example]]
 name = "docx_viewer"
-required-features = ["viewer", "docx-rdocx"]
+required-features = ["viewer", "docx-office"]
 
 [[example]]
 name = "xlsx_viewer"
@@ -84,6 +82,3 @@ required-features = ["viewer", "xlsx-calamine"]
 [[example]]
 name = "pptx_viewer"
 required-features = ["viewer", "pptx-office"]
-
-[patch.crates-io]
-oxml-layout = { path = "patches/oxml-layout" }

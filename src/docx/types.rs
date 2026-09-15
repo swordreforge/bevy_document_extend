@@ -15,7 +15,7 @@ pub enum DocxError {
     InvalidDpi(u32),
     PageOutOfRange { requested: usize, total: usize },
     Parse(String),
-    Layout(String),
+    Convert(String),
     Render(String),
     Image(String),
 }
@@ -30,7 +30,7 @@ impl fmt::Display for DocxError {
                 write!(f, "page {requested} out of range ({total} pages)")
             }
             DocxError::Parse(msg) => write!(f, "docx parse failed: {msg}"),
-            DocxError::Layout(msg) => write!(f, "docx layout failed: {msg}"),
+            DocxError::Convert(msg) => write!(f, "docx convert failed: {msg}"),
             DocxError::Render(msg) => write!(f, "docx render failed: {msg}"),
             DocxError::Image(msg) => write!(f, "image conversion failed: {msg}"),
         }

@@ -6,7 +6,7 @@ pub mod viewer;
 #[cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
 pub mod pdf;
 
-#[cfg(feature = "docx-rdocx")]
+#[cfg(feature = "docx-office")]
 pub mod docx;
 
 #[cfg(feature = "xlsx-calamine")]
@@ -15,7 +15,7 @@ pub mod xlsx;
 #[cfg(feature = "pptx-office")]
 pub mod pptx;
 
-#[cfg(all(feature = "viewer", feature = "docx-rdocx"))]
+#[cfg(all(feature = "viewer", feature = "docx-office"))]
 mod docx_viewer;
 #[cfg(all(feature = "viewer", any(feature = "pdf-hayro", feature = "pdf-zpdf")))]
 mod pdf_viewer;
@@ -24,7 +24,7 @@ mod pptx_viewer;
 #[cfg(all(feature = "viewer", feature = "xlsx-calamine"))]
 mod xlsx_viewer;
 
-#[cfg(all(feature = "viewer", feature = "docx-rdocx"))]
+#[cfg(all(feature = "viewer", feature = "docx-office"))]
 pub use docx_viewer::{view_docx, view_docx_with};
 #[cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
 pub use pdf::{

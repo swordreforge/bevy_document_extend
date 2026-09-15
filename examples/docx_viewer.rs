@@ -3,16 +3,16 @@
 //! Run (from the crate root):
 //!
 //! ```sh
-//! cargo run --release --example docx_viewer --features viewer,docx-rdocx
+//! cargo run --release --example docx_viewer --features viewer,docx-office
 //! ```
 //!
 //! Open your own file by passing a path (plus an optional start page and
 //! render resolution):
 //!
 //! ```sh
-//! cargo run --release --example docx_viewer --features viewer,docx-rdocx -- letter.docx
-//! cargo run --release --example docx_viewer --features viewer,docx-rdocx -- letter.docx 1
-//! cargo run --release --example docx_viewer --features viewer,docx-rdocx -- letter.docx 0 200
+//! cargo run --release --example docx_viewer --features viewer,docx-office -- letter.docx
+//! cargo run --release --example docx_viewer --features viewer,docx-office -- letter.docx 1
+//! cargo run --release --example docx_viewer --features viewer,docx-office -- letter.docx 0 200
 //! ```
 //!
 //! Flags: `--fit` / `--no-fit` force fit-to-width on/off (without flags,
@@ -25,7 +25,7 @@
 //!
 //! What this wires up: [`DefaultPlugins`] provides the window, renderer and
 //! UI stack; [`view_docx`](bevy_document_extend::view_docx) reads the file,
-//! lays it out with the rdocx backend, and installs the viewer plugin.
+//! converts it with the office2pdf backend, and installs the viewer plugin.
 //! Swap in your own path or call `view_docx_with(path, show_hud)` to hide
 //! the info bar programmatically.
 
