@@ -33,10 +33,17 @@
 //!   float-dpi backend only replaces that one function, the UI side is
 //!   already float.
 //!
-//! Render model: lazy per-page slots. Page jumps render their target
-//! synchronously; zoom/dpi changes re-render one page per frame, nearest the
-//! current page first, so a 13-page document sharpens progressively instead
-//! of stalling.
+//! Render model: two tiers by page count. Documents up to
+//! [`FULL_RESIDENT_LIMIT`] (20) pages keep every texture resident — no
+//! eviction, no window bookkeeping, just progressive fill; every page stays
+//! sharp once rendered. Longer documents switch to a sliding window: only
+//! the current page ± [`PREFETCH_RADIUS`] pages hold real textures
+//! ([`retained`]); a jump or scroll renders its first missing window page
+//! synchronously, then one more per frame until the window is full. Pages
+//! outside the window are evicted back to 1x1 white placeholders, so a
+//! 180-page document costs ~7 textures instead of 180. Dirty window pages
+//! (after a zoom/dpi change) refill the same way, nearest the current page
+//! first.
 
 use bevy::app::AppExit;
 use bevy::asset::RenderAssetUsages;
@@ -270,8 +277,9 @@ struct ViewerConfig {
 }
 
 /// Per-page render slot: one texture handle plus the texel size it was
-/// rendered at. `rendered_dpi != Doc::dpi` means dirty — [`refresh`] lazily
-/// re-renders it, nearest the current page first.
+/// rendered at. `rendered_dpi != Doc::dpi` (or a 1x1 evicted stub whose texel
+/// size reads 1x1) means dirty — [`refresh`] fills window pages lazily,
+/// nearest the current page first.
 struct PageSlot {
     node: Entity,
     handle: Handle<Image>,
@@ -280,13 +288,57 @@ struct PageSlot {
     rendered_dpi: u32,
 }
 
+/// Page count at or below which the viewer keeps every page resident: no
+/// eviction, no window bookkeeping — [`refresh`] just fills each page once
+/// and it stays sharp. Small documents feel instant; the sliding window
+/// ([`PREFETCH_RADIUS`]) only kicks in above this.
+const FULL_RESIDENT_LIMIT: usize = 20;
+
+/// Pages on each side of the current page that stay resident on long
+/// documents. 3 covers one viewport of context in each direction at fit width.
+const PREFETCH_RADIUS: usize = 3;
+
+/// Pages inside the resident window, current page first, then expanding
+/// outward — the fill order for jumps and lazy refill on long documents.
+/// Short documents (≤ [`FULL_RESIDENT_LIMIT`]) render in plain page order:
+/// everything is resident anyway, so filling 0..n needs no bookkeeping.
+fn window_order(pages: usize, current: usize) -> Vec<usize> {
+    if pages <= FULL_RESIDENT_LIMIT {
+        return (0..pages).collect();
+    }
+    let mut order = Vec::new();
+    if pages == 0 {
+        return order;
+    }
+    let current = current.min(pages - 1);
+    order.push(current);
+    for d in 1..=PREFETCH_RADIUS {
+        if current >= d {
+            order.push(current - d);
+        }
+        if current + d < pages {
+            order.push(current + d);
+        }
+    }
+    order
+}
+
+/// True when `page` belongs in the window around `current`. Short documents
+/// retain everything — no eviction below [`FULL_RESIDENT_LIMIT`].
+fn retained(pages: usize, current: usize, page: usize) -> bool {
+    if pages <= FULL_RESIDENT_LIMIT {
+        return true;
+    }
+    page < pages && page.abs_diff(current.min(pages.saturating_sub(1))) <= PREFETCH_RADIUS
+}
+
 /// Builds viewer state from [`ViewerConfig`] + [`DocumentSource`].
 ///
 /// Runs on [`Startup`]: derives zoom from the real requested-page size,
-/// registers one [`Image`] asset per page (requested page for real, the rest
-/// white placeholders), spawns the column UI, and moves the render closure
-/// into [`Doc`]. Splitting this out of `Plugin::build` is what lets the
-/// plugin stay plain data (no closure, no interior mutability).
+/// registers one [`Image`] asset per page (the start window rendered for
+/// real, the rest 1x1 evicted stubs), spawns the column UI, and moves the
+/// render closure into [`Doc`]. Splitting this out of `Plugin::build` is
+/// what lets the plugin stay plain data (no closure, no interior mutability).
 #[allow(clippy::too_many_arguments)]
 fn setup_from_source(
     mut commands: Commands,
@@ -315,6 +367,13 @@ fn setup_from_source(
     let dpi = (render_dpi(zoom) as f32 * scale).round().clamp(36.0, 600.0) as u32;
     let pages = config.pages.max(1);
     let start = config.page.min(pages - 1);
+    // Resident window first: the start image arrives pre-rendered in
+    // `DocumentSource`, so keep it and synchronously fill the rest of the
+    // start window (at most 2*RADIUS more backend renders). Everything
+    // outside the window gets a 1x1 evicted stub on the GPU — but the slot
+    // keeps the `fw`x`fh` *estimate* for layout, so the column total is
+    // stable from the first frame instead of growing for minutes while lazy
+    // fills land (that growth is what used to drag scroll off the top).
     let mut first = Some(first);
     let mut slots = Vec::with_capacity(pages);
     for i in 0..pages {
@@ -330,17 +389,23 @@ fn setup_from_source(
                 rendered_dpi: dpi,
             });
         } else {
-            let handle = images.add(blank_image(fw, fh));
+            let handle = images.add(evicted_image());
             slots.push(PageSlot {
                 node: Entity::PLACEHOLDER,
                 handle,
                 tex_w: fw,
                 tex_h: fh,
-                // 0 is outside the 36..=600 dpi range, so every placeholder
-                // reads as dirty until `refresh` fills it in.
+                // 0 is outside the 36..=600 dpi range, so the slot reads as
+                // dirty until its window turn comes.
                 rendered_dpi: 0,
             });
         }
+    }
+    for &i in &window_order(pages, start) {
+        if i == start {
+            continue;
+        }
+        render_slot(&render, &mut images, &mut slots[i], i, dpi);
     }
     let sizes: Vec<(f32, f32)> = slots
         .iter()
@@ -379,9 +444,16 @@ fn setup_from_source(
     commands.remove_resource::<DocumentSource>();
 }
 
-/// Opaque paper-white texture, sized like the requested page. Placeholders
-/// only need plausible dimensions for the first layout pass — [`refresh`]
-/// replaces them with real renders (and real sizes) within a few frames.
+/// 1x1 evicted stub: frees the texture while keeping the handle alive. The
+/// slot's `tex_w`/`tex_h` estimate (first-page size) keeps driving layout,
+/// so eviction never collapses the column — it only swaps GPU bytes for a
+/// single white pixel.
+fn evicted_image() -> Image {
+    blank_image(1, 1)
+}
+
+/// Opaque paper-white texture. Used for evicted stubs (1x1) only — real
+/// pages always render through the backend closure.
 fn blank_image(w: u32, h: u32) -> Image {
     Image::new_fill(
         Extent3d {
@@ -699,6 +771,12 @@ fn reanchor_scroll(
         // Opening on a requested start page (`viewer file.pdf 2`): jump
         // straight there on the first frame instead of opening at the top.
         Vec2::new(0.0, page_offset_y(&sizes, doc.page).clamp(0.0, max.y))
+    } else if total.y > doc.anchor_total.y + 0.5 && doc.anchor_init && doc.anchor_scroll.y <= 0.5 {
+        // Fresh page textures landing below while pinned to the top (the
+        // 180-page case: one lazy render per frame keeps growing the column
+        // for minutes). Hold scroll at 0 instead of letting the center-anchor
+        // math below convert real-size growth into a downward drift.
+        Vec2::new(scroll.0.x.clamp(0.0, max.x), 0.0)
     } else if doc.anchor_init && (total - doc.anchor_total).abs().max_element() > 0.5 {
         // Zoom tick (or a fresh page texture landing): re-center on the
         // viewport-center content point — except when pinned to an edge.
@@ -849,10 +927,12 @@ fn setup_ui(
     entities
 }
 
-/// Jump the viewport to `target`: render it synchronously (same instant
-/// feedback the old single-page viewer had on every page turn), then scroll
-/// its top edge into view. Wheel scrolling between jumps needs no render —
-/// neighbors fill in via [`refresh`] within a frame or two.
+/// Jump the viewport to `target`: on long documents fill the target window
+/// synchronously (same instant feedback the old single-page viewer had on
+/// every page turn) and evict the pages that fell out; on short documents
+/// (everything resident) just render the target if still dirty. Then scroll
+/// the target's top edge into view. Wheel scrolling into a filled window
+/// needs no render at all — the prefetch is already resident.
 fn jump_to_page(
     doc: &mut Doc,
     images: &mut Assets<Image>,
@@ -862,10 +942,35 @@ fn jump_to_page(
     let target = target.min(doc.pages.max(1) - 1);
     doc.page = target;
     let dpi = doc.dpi;
-    render_slot(&doc.render, images, &mut doc.slots[target], target, dpi);
+    evict_outside_window(doc, images, target);
+    for &i in &window_order(doc.pages, target) {
+        render_slot(&doc.render, images, &mut doc.slots[i], i, dpi);
+    }
     let sizes = page_display_sizes(doc);
     if let Ok(mut pos) = scroll.single_mut() {
         pos.0.y = page_offset_y(&sizes, target);
+    }
+}
+
+/// Swap every texture outside the window around `current` for a 1x1 stub.
+///
+/// Keeps `tex_w`/`tex_h` estimates (and `rendered_dpi`, so the slot still
+/// reads dirty at its true size later) — only GPU bytes are freed, layout
+/// never moves. Skips slots already stubbed so settled frames do zero
+/// asset writes.
+fn evict_outside_window(doc: &mut Doc, images: &mut Assets<Image>, current: usize) {
+    let pages = doc.pages;
+    for (i, slot) in doc.slots.iter_mut().enumerate() {
+        if retained(pages, current, i) {
+            continue;
+        }
+        if slot.tex_w <= 1 && slot.tex_h <= 1 {
+            continue;
+        }
+        if let Some(mut dest) = images.get_mut(&slot.handle) {
+            *dest = evicted_image();
+            slot.rendered_dpi = 0;
+        }
     }
 }
 
@@ -1026,13 +1131,17 @@ fn refresh(
             }
         }
     }
-    // Lazy fill: nearest dirty slot first, one backend render per frame, so
-    // a zoom settle on a long document sharpens progressively instead of
-    // stalling the frame loop.
+    // Page maintenance, two tiers. Short documents (<= FULL_RESIDENT_LIMIT):
+    // no eviction, just fill each page once in order — everything stays
+    // sharp. Long documents: evict what scrolled out of the ±3 window, then
+    // fill one missing (or dirty, after a zoom/dpi change) window page per
+    // frame, current page first. One backend render per frame keeps scrolling
+    // at 60fps; a zoom settle sharpens the window progressively instead of
+    // stalling. Pages outside the window never render — that is the whole
+    // point of the 180-page fix: memory stays at ~7 textures, not 180.
     let doc_mut = &mut *doc;
-    let current = doc_mut.page;
-    let mut order: Vec<usize> = (0..doc_mut.pages).collect();
-    order.sort_by_key(|&i| i.abs_diff(current));
+    evict_outside_window(doc_mut, &mut images, doc_mut.page);
+    let order = window_order(doc_mut.pages, doc_mut.page);
     let mut all_clean = true;
     for i in order {
         if doc_mut.slots[i].rendered_dpi != doc_mut.dpi {
