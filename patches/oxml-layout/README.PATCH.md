@@ -24,6 +24,11 @@ memmap = ["fontdb/memmap"]
 Lets downstream opt into `fontdb` unification arms without pulling
 `system-fonts` (no fontconfig/system discovery).
 
-## Removal
-Delete this dir + the `[patch.crates-io]` section once upstream fixes the
-non-exhaustive match (e.g. wildcard arm or decoupling from unified features).
+## Maintenance / removal
+- While this patch is carried locally, crate versions stay pre-release
+  (`0.1.0-alpha.x`) and `cargo publish` requires `--no-verify`, because
+  verification resolves the *unpatched* crates.io deps (known E0004 in
+  `oxml-layout 0.11.0` + unified `fontdb` features).
+- Delete this dir + the `[patch.crates-io]` section and promote to a stable
+  version once upstream fixes the non-exhaustive match (e.g. wildcard arm
+  or decoupling from unified features).

@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_document_extend"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 dependencies = [
  "bevy",
  "calamine",

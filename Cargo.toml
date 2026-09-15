@@ -1,7 +1,16 @@
 [package]
 name = "bevy_document_extend"
-version = "0.1.0"
+# Pre-release: ships with a local patch for oxml-layout 0.11.0 (see
+# patches/oxml-layout/README.PATCH.md). Until upstream fixes the
+# non-exhaustive fontdb::Source match, `cargo publish` requires
+# `--no-verify` because verification resolves unpatched crates.io deps.
+version = "0.1.0-alpha.0"
 edition = "2024"
+description = "Bevy document rendering extensions: rasterize PDF/DOCX/XLSX pages to Bevy images"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/swordreforge/bevy_document_extend"
+keywords = ["bevy", "pdf", "docx", "xlsx", "render"]
+categories = ["game-engines", "multimedia"]
 
 [features]
 default = ["pdf-hayro", "docx-rdocx", "xlsx-calamine-office2pdf"]
