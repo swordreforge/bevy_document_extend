@@ -7,9 +7,7 @@ fn main() {
 fn main() {
     use bevy::prelude::*;
     use bevy_document_extend::view_pdf;
-    let (plugin, source) = view_pdf("tests/exp/pdf/sample.pdf");
     App::new()
-        .add_plugins((DefaultPlugins, plugin))
-        .insert_resource(source)
+        .add_plugins((DefaultPlugins, view_pdf("tests/exp/pdf/sample.pdf")))
         .run();
 }
