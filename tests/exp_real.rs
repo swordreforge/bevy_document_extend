@@ -4,9 +4,7 @@
 //! with zero setup. Run with default features:
 //! `cargo test --test exp_real`.
 
-static PDF: &[u8] = include_bytes!(
-    "exp/pdf/researcher-paper-意向残余、淤积动力学与节点涌现：本原信息的一种形式理论.pdf"
-);
+static PDF: &[u8] = include_bytes!("exp/pdf/sample.pdf");
 static DOCX: &[u8] = include_bytes!("exp/docx/sample3.docx");
 static XLSX: &[u8] = include_bytes!("exp/xlsx/sample100.xlsx");
 #[cfg(feature = "pptx-office")]
@@ -16,11 +14,13 @@ static PPTX: &[u8] = include_bytes!("exp/pptx/sample.pptx");
 #[cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
 fn pdf_real_probes_and_renders() {
     let meta = bevy_document_extend::probe(PDF).expect("probe real pdf");
-    assert_eq!(meta.pages, 13);
+    assert_eq!(meta.pages, 3);
     let buf = bevy_document_extend::rasterize_page(PDF, 0, 72).expect("rasterize p0");
-    // A4 @72dpi ≈ 595x842; hayro/zpdf round sub-pixel edges differently (±1px).
-    assert!((594..=597).contains(&buf.width), "width {}", buf.width);
-    assert!((840..=843).contains(&buf.height), "height {}", buf.height);
+    // A4 @72dpi ≈ 595x842, US Letter ≈ 612x792; hayro/zpdf round sub-pixel
+    // edges differently (±1px).
+    let a4 = (594..=597).contains(&buf.width) && (840..=843).contains(&buf.height);
+    let letter = (611..=613).contains(&buf.width) && (791..=793).contains(&buf.height);
+    assert!(a4 || letter, "unexpected size {}x{}", buf.width, buf.height);
     let hi = bevy_document_extend::rasterize_page(PDF, 0, 150).expect("rasterize p0 @150");
     assert!(hi.width > buf.width && hi.height > buf.height);
 }
