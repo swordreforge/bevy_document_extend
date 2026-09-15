@@ -19,8 +19,13 @@ impl RasterBackend for HayroBackend {
         check_input(pdf)?;
         let doc = hayro::hayro_syntax::Pdf::new(pdf.to_vec())
             .map_err(|e| PdfError::Parse(format!("{e:?}")))?;
+        // Contract: `pages` is at least 1. `probe` is the viewer clamp's
+        // single source of truth — a 0-page PDF is malformed input, and
+        // surfacing it here keeps `pages - 1` underflow guards out of every
+        // example and downstream caller.
+        let pages = doc.pages().len().max(1);
         Ok(DocMetadata {
-            pages: doc.pages().len(),
+            pages,
             version: format!("{:?}", doc.version()),
         })
     }

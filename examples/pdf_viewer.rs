@@ -11,15 +11,15 @@ fn main() {
         viewer::{DocumentSource, DocumentViewerPlugin, ViewerArgs},
     };
 
-    let args = ViewerArgs::parse(
-        "tests/exp/pdf/researcher-paper-意向残余、淤积动力学与节点涌现：本原信息的一种形式理论.pdf",
-    );
-    let bytes = std::fs::read(&args.path).expect("read pdf file");
+    let args = ViewerArgs::parse("tests/exp/pdf/sample.pdf");
+    let bytes = std::fs::read(&args.path).unwrap_or_else(|e| panic!("read {}: {e}", args.path));
 
     let meta = probe(&bytes).expect("probe pdf");
     let info = format!("{} pages, version {}", meta.pages, meta.version);
     println!("{}: {info}", args.path);
-    let page = args.page.min(meta.pages.max(1) - 1);
+
+    // Contract: `probe` guarantees `pages >= 1`, so no underflow guard here.
+    let page = args.page.min(meta.pages - 1);
     let bytes_for_render = bytes.clone();
     let first = rasterize_page_to_bevy(&bytes, page, args.dpi).expect("rasterize pdf page");
     App::new()

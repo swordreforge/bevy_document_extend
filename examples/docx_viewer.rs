@@ -10,7 +10,7 @@ fn main() {
     use bevy_document_extend::viewer::{DocumentSource, DocumentViewerPlugin, ViewerArgs};
 
     let args = ViewerArgs::parse("tests/exp/docx/sample3.docx");
-    let bytes = std::fs::read(&args.path).expect("read docx file");
+    let bytes = std::fs::read(&args.path).unwrap_or_else(|e| panic!("read {}: {e}", args.path));
 
     let meta = probe(&bytes).expect("probe docx");
     let info = format!(
@@ -18,7 +18,8 @@ fn main() {
         meta.pages, meta.paragraphs, meta.tables, meta.words
     );
     println!("{}: {info}", args.path);
-    let page = args.page.min(meta.pages.max(1) - 1);
+    // Contract: `probe` guarantees `pages >= 1`, so no underflow guard here.
+    let page = args.page.min(meta.pages - 1);
     let bytes_for_render = bytes.clone();
     let first = rasterize_page_to_bevy(&bytes, page, args.dpi).expect("rasterize docx page");
     App::new()

@@ -10,7 +10,7 @@ fn main() {
     use bevy_document_extend::xlsx::{page_count, probe, rasterize_page_to_bevy};
 
     let args = ViewerArgs::parse("tests/exp/xlsx/sample100.xlsx");
-    let bytes = std::fs::read(&args.path).expect("read xlsx file");
+    let bytes = std::fs::read(&args.path).unwrap_or_else(|e| panic!("read {}: {e}", args.path));
 
     let meta = probe(&bytes).expect("probe xlsx");
     let pages = page_count(&bytes).expect("xlsx page count");
@@ -19,7 +19,8 @@ fn main() {
         meta.sheets, meta.rows, meta.cols, meta.non_empty_cells
     );
     println!("{}: {info}", args.path);
-    let page = args.page.min(pages.max(1) - 1);
+    // Contract: `page_count` guarantees `>= 1`, so no underflow guard here.
+    let page = args.page.min(pages - 1);
     let bytes_for_render = bytes.clone();
     let first = rasterize_page_to_bevy(&bytes, page, args.dpi).expect("rasterize xlsx page");
     App::new()

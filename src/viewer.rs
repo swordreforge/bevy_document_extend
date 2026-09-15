@@ -41,9 +41,13 @@ type RenderCallback = dyn Fn(usize, u32) -> Option<Image> + Send + Sync;
 /// it (registers the first page as an [`Image`] asset, moves the closure into
 /// the viewer state).
 ///
-/// Keeping the closure in a [`Resource`] instead of the plugin avoids
-/// one-shot interior mutability in `Plugin::build` (`build` only gets `&self`,
-/// so a plugin-held `Fn` would need a `Mutex` + `take()` + panic-on-reuse).
+/// This closure is a deliberate extension point, not a shortcut: it is the
+/// strategy seam that lets one viewer shell serve any backend (PDF via
+/// hayro/zpdf, DOCX via rdocx, XLSX via calamine+office2pdf, or a caller's
+/// own renderer) without the plugin depending on every format crate. It plays
+/// the same role as an `AssetLoader` in `bevy_asset` — per-format loading
+/// logic injected at the boundary, rendering itself still done by systems
+/// ([`refresh`]) inside the plugin.
 #[derive(Resource)]
 pub struct DocumentSource {
     pub first: Image,

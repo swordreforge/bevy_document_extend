@@ -29,8 +29,9 @@ impl DocxBackend for RdocxBackend {
 
     fn probe(&self, docx: &[u8]) -> Result<DocxMetadata, DocxError> {
         let doc = Self::open(docx)?;
+        // Contract: `pages` is at least 1 — see `HayroBackend::probe`.
         Ok(DocxMetadata {
-            pages: Self::layout_pages(&doc)?,
+            pages: Self::layout_pages(&doc)?.max(1),
             paragraphs: doc.paragraph_count(),
             tables: doc.table_count(),
             words: doc.word_count(),

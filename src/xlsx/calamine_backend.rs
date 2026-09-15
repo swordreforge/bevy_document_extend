@@ -141,7 +141,9 @@ impl XlsxBackend for CalamineOfficeBackend {
 
     fn page_count(&self, xlsx: &[u8]) -> Result<usize, XlsxError> {
         let pdf = self.to_pdf(xlsx)?;
-        Self::pdf_pages(&pdf)
+        // Contract: page counts are at least 1 — see `HayroBackend::probe`.
+        // `pdf_pages` funnels through `crate::pdf`, whose backends clamp.
+        Ok(Self::pdf_pages(&pdf)?.max(1))
     }
 
     fn rasterize_page(&self, xlsx: &[u8], page: usize, dpi: u32) -> Result<ImageBuffer, XlsxError> {

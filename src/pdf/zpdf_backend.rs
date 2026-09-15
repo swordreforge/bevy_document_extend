@@ -21,8 +21,9 @@ impl RasterBackend for ZpdfBackend {
         let doc =
             zpdf::PdfDocument::open(pdf.to_vec()).map_err(|e| PdfError::Parse(e.to_string()))?;
         let (major, minor) = doc.version();
+        // Contract: `pages` is at least 1 — see `HayroBackend::probe`.
         Ok(DocMetadata {
-            pages: doc.page_count(),
+            pages: doc.page_count().max(1),
             version: format!("{major}.{minor}"),
         })
     }
