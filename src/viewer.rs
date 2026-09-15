@@ -5,9 +5,13 @@
 //! it. It spawns the page viewport, HUD bar, input systems and debounced
 //! re-raster wiring for you.
 //!
-//! Layout: full-window scrollable page image, optional bottom HUD bar with
-//! the probe line plus `[Left]/[Right] page, wheel scroll, Ctrl+wheel/pinch
-//! zoom, [Up]/[Down] zoom, 0 fit, Q quit` (see [`DocumentViewerPlugin::show_hud`]).
+//! Layout: full-window vertical column of *all* pages (browser-style
+//! continuous scroll: wheel from the first page straight through to the
+//! last), optional bottom HUD bar with the probe line plus `[Left]/[Right]
+//! page, [Home]/[End] first/last, wheel scroll, Ctrl+wheel/pinch zoom,
+//! [Up]/[Down] zoom, 0 fit, Q quit` (see [`DocumentViewerPlugin::show_hud`]).
+//! The document still opens fitted to one page width; scrolling moves through
+//! pages instead of swapping them.
 //!
 //! HUD text uses ASCII separators only, so it renders under the default font
 //! in any locale.
@@ -20,7 +24,7 @@
 //! Zoom model: two-level continuous zoom.
 //!
 //! - Display zoom (`Doc::zoom`) is a float updated immediately on every
-//!   input tick; the page Node is resized from the *existing* texture, so
+//!   input tick; the page Nodes are resized from the *existing* textures, so
 //!   gestures stay smooth at 60fps with pure GPU scaling.
 //! - Render resolution (`Doc::rendered_zoom` + integer `dpi`) only refreshes
 //!   after the zoom settles ([`RERASTER_DELAY`]) *and* drifts outside
@@ -28,11 +32,18 @@
 //!   Backends still take integer dpi, so [`render_dpi`] rounds — a future
 //!   float-dpi backend only replaces that one function, the UI side is
 //!   already float.
+//!
+//! Render model: lazy per-page slots. Page jumps render their target
+//! synchronously; zoom/dpi changes re-render one page per frame, nearest the
+//! current page first, so a 13-page document sharpens progressively instead
+//! of stalling.
 
 use bevy::app::AppExit;
+use bevy::asset::RenderAssetUsages;
 use bevy::input::gestures::PinchGesture;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::ui::UiSystems;
 use bevy::window::PrimaryWindow;
 
@@ -42,8 +53,9 @@ type RenderCallback = dyn Fn(usize, u32) -> Option<Image> + Send + Sync;
 
 /// Page bytes plus render closure for the viewer. Insert once before or after
 /// adding [`DocumentViewerPlugin`]; the plugin's [`Startup`] system consumes
-/// it (registers the first page as an [`Image`] asset, moves the closure into
-/// the viewer state).
+/// it (registers one [`Image`] asset per page — the requested page rastered
+/// for real, the rest white placeholders that [`refresh`] fills in lazily —
+/// and moves the closure into the viewer state).
 ///
 /// This closure is a deliberate extension point, not a shortcut: it is the
 /// strategy seam that lets one viewer shell serve any backend (PDF via
@@ -189,7 +201,12 @@ impl Plugin for DocumentViewerPlugin {
                 Update,
                 (navigate, auto_fit, wheel, maybe_reraster, refresh).chain(),
             )
-            .add_systems(PostUpdate, reanchor_scroll.after(UiSystems::Layout));
+            .add_systems(
+                PostUpdate,
+                (reanchor_scroll, track_page)
+                    .chain()
+                    .after(UiSystems::Layout),
+            );
     }
 }
 
@@ -252,15 +269,29 @@ struct ViewerConfig {
     show_hud: bool,
 }
 
+/// Per-page render slot: one texture handle plus the texel size it was
+/// rendered at. `rendered_dpi != Doc::dpi` means dirty — [`refresh`] lazily
+/// re-renders it, nearest the current page first.
+struct PageSlot {
+    node: Entity,
+    handle: Handle<Image>,
+    tex_w: u32,
+    tex_h: u32,
+    rendered_dpi: u32,
+}
+
 /// Builds viewer state from [`ViewerConfig`] + [`DocumentSource`].
 ///
-/// Runs on [`Startup`]: derives zoom from the real first-page size,
-/// registers it as an [`Image`] asset, and moves the render closure into
-/// [`Doc`]. Splitting this out of `Plugin::build` is what lets the plugin
-/// stay plain data (no closure, no interior mutability).
+/// Runs on [`Startup`]: derives zoom from the real requested-page size,
+/// registers one [`Image`] asset per page (requested page for real, the rest
+/// white placeholders), spawns the column UI, and moves the render closure
+/// into [`Doc`]. Splitting this out of `Plugin::build` is what lets the
+/// plugin stay plain data (no closure, no interior mutability).
+#[allow(clippy::too_many_arguments)]
 fn setup_from_source(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     config: Res<ViewerConfig>,
     mut source: ResMut<DocumentSource>,
 ) {
@@ -270,48 +301,99 @@ fn setup_from_source(
         .render
         .take()
         .expect("DocumentSource holds one render closure");
-    let native_w = first.width() as f32 * BASE_DPI / config.dpi.max(1) as f32;
+    let (fw, fh) = (first.width().max(1), first.height().max(1));
+    let scale = windows
+        .single()
+        .map(|w| w.scale_factor().max(1.0))
+        .unwrap_or(1.0);
+    let native_w = fw as f32 * BASE_DPI / config.dpi.max(1) as f32;
     let zoom = if config.fit {
         fit_zoom(ASSUMED_WINDOW_W, native_w)
     } else {
         (config.dpi as f32 / BASE_DPI).clamp(MIN_ZOOM, MAX_ZOOM)
     };
-    let dpi = render_dpi(zoom);
-    let (w, h) = display_size(first.width(), first.height(), zoom, dpi);
-    let (tex_w, tex_h) = (first.width(), first.height());
-    let handle = images.add(first);
-    let image = handle.clone();
+    let dpi = (render_dpi(zoom) as f32 * scale).round().clamp(36.0, 600.0) as u32;
+    let pages = config.pages.max(1);
+    let start = config.page.min(pages - 1);
+    let mut first = Some(first);
+    let mut slots = Vec::with_capacity(pages);
+    for i in 0..pages {
+        if i == start {
+            let img = first.take().expect("requested page image");
+            let (tw, th) = (img.width().max(1), img.height().max(1));
+            let handle = images.add(img);
+            slots.push(PageSlot {
+                node: Entity::PLACEHOLDER,
+                handle,
+                tex_w: tw,
+                tex_h: th,
+                rendered_dpi: dpi,
+            });
+        } else {
+            let handle = images.add(blank_image(fw, fh));
+            slots.push(PageSlot {
+                node: Entity::PLACEHOLDER,
+                handle,
+                tex_w: fw,
+                tex_h: fh,
+                // 0 is outside the 36..=600 dpi range, so every placeholder
+                // reads as dirty until `refresh` fills it in.
+                rendered_dpi: 0,
+            });
+        }
+    }
+    let sizes: Vec<(f32, f32)> = slots
+        .iter()
+        .map(|s| display_size(s.tex_w, s.tex_h, zoom, dpi))
+        .collect();
+    let handles: Vec<Handle<Image>> = slots.iter().map(|s| s.handle.clone()).collect();
+    let doc = DocRef {
+        title: config.title.clone(),
+        probe: config.probe.clone(),
+        pages,
+        page: start,
+        dpi,
+        zoom,
+    };
+    let entities = setup_ui(&mut commands, &doc, &handles, &sizes, config.show_hud);
+    for (slot, entity) in slots.iter_mut().zip(entities) {
+        slot.node = entity;
+    }
     commands.insert_resource(Doc {
         title: config.title.clone(),
         probe: config.probe.clone(),
-        pages: config.pages,
-        page: config.page,
+        pages,
+        page: start,
         zoom,
         rendered_zoom: zoom,
         zoom_idle: RERASTER_DELAY,
         native_w,
         manual_zoom: !config.fit,
-        tex_w,
-        tex_h,
-        anchor_content: Vec2::ZERO,
+        anchor_total: Vec2::ZERO,
         anchor_scroll: Vec2::ZERO,
         anchor_init: false,
         dpi,
-        rendered_page: config.page,
-        rendered_dpi: dpi,
-        image: handle,
+        slots,
         render,
     });
     commands.remove_resource::<DocumentSource>();
-    let doc = DocRef {
-        title: config.title.clone(),
-        probe: config.probe.clone(),
-        pages: config.pages,
-        page: config.page,
-        dpi,
-        zoom,
-    };
-    setup_ui(commands, &doc, image, w, h, config.show_hud);
+}
+
+/// Opaque paper-white texture, sized like the requested page. Placeholders
+/// only need plausible dimensions for the first layout pass — [`refresh`]
+/// replaces them with real renders (and real sizes) within a few frames.
+fn blank_image(w: u32, h: u32) -> Image {
+    Image::new_fill(
+        Extent3d {
+            width: w.max(1),
+            height: h.max(1),
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[255, 255, 255, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
 }
 
 /// Minimal snapshot for HUD text — implemented for both the [`setup_ui`]
@@ -445,7 +527,7 @@ fn hud_line(doc: &(impl HudState + ?Sized)) -> String {
     // in any locale. Non-ASCII separators (middle dot, em dash, CJK arrows)
     // fall back to tofu boxes when the system font lacks those glyphs.
     format!(
-        "{}, {}, page {}/{}, {}dpi, {:.0}%, [Left]/[Right] page, wheel scroll, Ctrl+wheel/pinch zoom, [Up]/[Down] zoom, 0 fit, Q quit",
+        "{}, {}, page {}/{}, {}dpi, {:.0}%, [Left]/[Right] page, [Home]/[End] first/last, wheel scroll, Ctrl+wheel/pinch zoom, [Up]/[Down] zoom, 0 fit, Q quit",
         doc.title(),
         doc.probe(),
         doc.page() + 1,
@@ -464,6 +546,8 @@ const KEY_ZOOM_STEP: f32 = 1.25;
 /// zoom gain must be much higher than for stepped mouse wheels.
 const WHEEL_ZOOM_SPEED: f32 = 0.35;
 const LINE_SCROLL_PX: f32 = 32.0;
+/// Vertical gap between consecutive pages in the scroll column.
+const PAGE_GAP: f32 = 16.0;
 /// Zoom must sit still this long before a re-raster fires, so mid-gesture
 /// ticks only GPU-scale the existing texture.
 const RERASTER_DELAY: f32 = 0.25;
@@ -480,12 +564,16 @@ struct Doc {
     title: String,
     probe: String,
     pages: usize,
+    /// Current page: set by jumps ([`jump_to_page`]) and kept live while
+    /// scrolling by [`track_page`]; drives the HUD readout and the
+    /// nearest-first order in [`refresh`].
     page: usize,
     /// Display zoom; 1.0 shows a BASE_DPI render at native pixels. Updated
-    /// on every input tick; only drives the page Node size.
+    /// on every input tick; only drives the page Node sizes.
     zoom: f32,
-    /// Zoom level the current texture was rendered at. Chases `zoom` via
-    /// debounced re-raster in [`maybe_reraster`].
+    /// Zoom level every slot is rendered at. Chases `zoom` via debounced
+    /// re-raster in [`maybe_reraster`]; only re-armed once *all* slots are
+    /// clean, so progressive per-page fills don't confuse the drift check.
     rendered_zoom: f32,
     /// Seconds since the last zoom input; gates the re-raster in
     /// [`maybe_reraster`].
@@ -495,30 +583,25 @@ struct Doc {
     /// False until the user zooms (or passes an explicit dpi); while false
     /// [`auto_fit`] keeps the page fitted to the window width.
     manual_zoom: bool,
-    /// Last rendered texture size, for [`display_size`] without re-render.
-    tex_w: u32,
-    tex_h: u32,
-    /// Validated post-layout `(content, scroll)` snapshot from the previous
-    /// frame. [`reanchor_scroll`] diffs the page Node size against
-    /// `anchor_content` to tell zoom ticks from scroll-only frames, anchoring
+    /// Validated post-layout total-column-size + scroll snapshot from the
+    /// previous frame. [`reanchor_scroll`] diffs the column total against
+    /// `anchor_total` to tell zoom ticks from scroll-only frames, anchoring
     /// zoom on the viewport-center content point; scroll passes through with
     /// a single fresh clamp.
-    anchor_content: Vec2,
+    anchor_total: Vec2,
     anchor_scroll: Vec2,
     anchor_init: bool,
     /// Committed render dpi. [`maybe_reraster`] updates it from the display
-    /// zoom after a settle delay; [`refresh`] re-renders only when
-    /// `(page, dpi)` differs from `(rendered_page, rendered_dpi)`, so
-    /// per-tick display-zoom changes never trigger a raster.
+    /// zoom after a settle delay; [`refresh`] re-renders dirty slots only
+    /// (one per frame, nearest first), so per-tick display-zoom changes
+    /// never trigger a raster.
     dpi: u32,
-    rendered_page: usize,
-    rendered_dpi: u32,
-    image: Handle<Image>,
+    slots: Vec<PageSlot>,
     render: Box<RenderCallback>,
 }
 
 #[derive(Component)]
-struct PageImage;
+struct PageImage(usize);
 
 #[derive(Component)]
 struct Viewport;
@@ -530,17 +613,41 @@ fn render_dpi(zoom: f32) -> u32 {
     (BASE_DPI * zoom).round().clamp(36.0, 600.0) as u32
 }
 
+/// Render one slot through the backend closure into its asset.
+///
+/// Returns true on success; on failure (`None`) the placeholder stays and
+/// the slot keeps reading as dirty, so a later frame retries.
+fn render_slot(
+    render: &RenderCallback,
+    images: &mut Assets<Image>,
+    slot: &mut PageSlot,
+    page: usize,
+    dpi: u32,
+) -> bool {
+    if let Some(image) = render(page, dpi)
+        && let Some(mut dest) = images.get_mut(&slot.handle)
+    {
+        slot.tex_w = image.width().max(1);
+        slot.tex_h = image.height().max(1);
+        slot.rendered_dpi = dpi;
+        *dest = image;
+        return true;
+    }
+    false
+}
+
 /// Re-anchor scroll *after* layout, against fresh geometry.
 ///
-/// Input systems only resize the page Node and bump `ScrollPosition` blindly.
-/// This system runs in PostUpdate after [`UiSystems::Layout`] and owns the
-/// final scroll value:
-/// - content unchanged since last frame → pass the input scroll through,
+/// Input systems only bump `ScrollPosition` blindly and [`refresh`] only
+/// resizes page Nodes. This system runs in PostUpdate after
+/// [`UiSystems::Layout`] and owns the final scroll value:
+/// - column total unchanged since last frame → pass the input scroll through,
 ///   clamped to the fresh max (this is the only clamp in the codebase —
 ///   the wheel handler does pure addition, no per-tick recompute);
-/// - content changed (zoom tick) → keep the content point under the viewport
-///   center stable: anchor from last frame's validated `(content, scroll)`
-///   snapshot, scale by the real size ratio, re-center, clamp.
+/// - column total changed (zoom tick or fresh page texture) → keep the content
+///   point under the viewport center stable: anchor from last frame's
+///   validated `(total, scroll)` snapshot, scale by the real size ratio,
+///   re-center, clamp.
 ///
 /// Everything here reads post-layout `ComputedNode`, so there is no
 /// stale-size bias — the old code read pre-layout sizes at input time, which
@@ -548,44 +655,53 @@ fn render_dpi(zoom: f32) -> u32 {
 fn reanchor_scroll(
     mut doc: ResMut<Doc>,
     mut viewport: Query<(&ComputedNode, &mut ScrollPosition), With<Viewport>>,
-    mut page_nodes: Query<&mut Node, With<PageImage>>,
+    mut page_nodes: Query<(&mut Node, &PageImage)>,
 ) {
     let Ok((computed, mut scroll)) = viewport.single_mut() else {
-        return;
-    };
-    let Ok(mut page) = page_nodes.single_mut() else {
-        return;
-    };
-    let (Val::Px(w), Val::Px(h)) = (page.width, page.height) else {
         return;
     };
     let vis = computed.size * computed.inverse_scale_factor;
     if vis.x <= 1.0 || vis.y <= 1.0 {
         return;
     }
-    let content = Vec2::new(w, h);
+    let sizes = page_display_sizes(&doc);
+    if sizes.len() != doc.slots.len() || sizes.is_empty() {
+        return;
+    }
+    let total = column_total(&sizes);
     // Explicit centering margins instead of margin:Auto. Taffy counts a
     // single-sided auto margin into content_size (logs show content - node
     // == (vis - node)/2), inflating the scroll range with phantom space.
-    let mx = ((vis.x - content.x) * 0.5).max(0.0);
-    let my = ((vis.y - content.y) * 0.5).max(0.0);
-    if !matches!(page.margin.left, Val::Px(x) if (x - mx).abs() <= 0.01) {
-        page.margin.left = Val::Px(mx);
-        page.margin.right = Val::Px(mx);
+    for (mut node, idx) in &mut page_nodes {
+        let Some(&(w, _)) = sizes.get(idx.0) else {
+            continue;
+        };
+        let mx = ((vis.x - w) * 0.5).max(0.0);
+        if !matches!(node.margin.left, Val::Px(x) if (x - mx).abs() <= 0.01) {
+            node.margin.left = Val::Px(mx);
+            node.margin.right = Val::Px(mx);
+        }
+        if !matches!(node.margin.top, Val::Px(x) if x.abs() <= 0.01) {
+            node.margin.top = Val::Px(0.0);
+            node.margin.bottom = Val::Px(0.0);
+        }
     }
-    if !matches!(page.margin.top, Val::Px(y) if (y - my).abs() <= 0.01) {
-        page.margin.top = Val::Px(my);
-        page.margin.bottom = Val::Px(my);
+    // When the whole column fits, pad the first page down so it sits
+    // vertically centered instead of glued to the top.
+    let pad = ((vis.y - total.y) * 0.5).max(0.0);
+    for (mut node, idx) in &mut page_nodes {
+        if idx.0 == 0 && !matches!(node.margin.top, Val::Px(x) if (x - pad).abs() <= 0.01) {
+            node.margin.top = Val::Px(pad);
+        }
     }
-    let total = content + Vec2::new(mx * 2.0, my * 2.0);
     let max = (total - vis).max(Vec2::ZERO);
-    let out = if doc.anchor_init && (content - doc.anchor_content).abs().max_element() > 0.5 {
+    let out = if doc.anchor_init && (total - doc.anchor_total).abs().max_element() > 0.5 {
         // Zoom tick: re-center on the viewport-center content point.
         let mut out = Vec2::ZERO;
         for i in 0..2 {
             let v = vis[i].max(1.0);
-            let c_new = content[i].max(1.0);
-            let c_old = doc.anchor_content[i].max(1.0);
+            let c_new = total[i].max(1.0);
+            let c_old = doc.anchor_total[i].max(1.0);
             let p = if c_old <= v {
                 c_old * 0.5
             } else {
@@ -599,25 +715,17 @@ fn reanchor_scroll(
         scroll.0.clamp(Vec2::ZERO, max)
     };
     scroll.0 = out;
-    doc.anchor_content = content;
+    doc.anchor_total = total;
     doc.anchor_scroll = out;
     doc.anchor_init = true;
 }
 
-fn apply_display_zoom(
-    doc: &mut Doc,
-    zoom: f32,
-    page_nodes: &mut Query<(&mut Node, &mut ImageNode), With<PageImage>>,
-) {
-    let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-    doc.zoom = zoom;
+fn apply_display_zoom(doc: &mut Doc, zoom: f32) {
+    doc.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     doc.zoom_idle = 0.0;
     doc.manual_zoom = true;
-    let (w, h) = display_size(doc.tex_w, doc.tex_h, doc.zoom, doc.dpi);
-    for (mut node, _) in page_nodes {
-        node.width = Val::Px(w);
-        node.height = Val::Px(h);
-    }
+    // Node sizes are reconciled in `refresh` (same frame, later in the
+    // chain), so zoom ticks stay pure state updates here.
 }
 
 fn fit_zoom(window_w: f32, native_w: f32) -> f32 {
@@ -630,14 +738,37 @@ fn display_size(img_w: u32, img_h: u32, zoom: f32, dpi: u32) -> (f32, f32) {
     (img_w as f32 * k, img_h as f32 * k)
 }
 
+/// Display sizes of every slot at the current zoom — the single source of
+/// truth for layout, scroll offsets and the zoom anchor.
+fn page_display_sizes(doc: &Doc) -> Vec<(f32, f32)> {
+    doc.slots
+        .iter()
+        .map(|s| display_size(s.tex_w, s.tex_h, doc.zoom, doc.dpi))
+        .collect()
+}
+
+/// Total column size: widest page across, heights plus gaps down.
+fn column_total(sizes: &[(f32, f32)]) -> Vec2 {
+    let w = sizes.iter().map(|(w, _)| *w).fold(0.0, f32::max);
+    let h = sizes.iter().map(|(_, h)| *h).sum::<f32>()
+        + PAGE_GAP * sizes.len().saturating_sub(1) as f32;
+    Vec2::new(w, h)
+}
+
+/// Y offset of the top edge of `page` inside the column.
+fn page_offset_y(sizes: &[(f32, f32)], page: usize) -> f32 {
+    let page = page.min(sizes.len().saturating_sub(1));
+    sizes[..page].iter().map(|(_, h)| *h).sum::<f32>() + PAGE_GAP * page as f32
+}
+
 fn setup_ui(
-    mut commands: Commands,
+    commands: &mut Commands,
     doc: &(impl HudState + ?Sized),
-    image: Handle<Image>,
-    w: f32,
-    h: f32,
+    handles: &[Handle<Image>],
+    sizes: &[(f32, f32)],
     show_hud: bool,
-) {
+) -> Vec<Entity> {
+    let mut entities = Vec::with_capacity(handles.len());
     commands.spawn(Camera2d);
     commands
         .spawn((
@@ -654,35 +785,33 @@ fn setup_ui(
                 Viewport,
                 Node {
                     flex_grow: 1.0,
-                    // NOTE: intentionally NOT centered here. A centered child
-                    // that outgrows a scroll container gets its start edge
-                    // clipped and unreachable, which made zoom visibly jump
-                    // right once the page exceeded the viewport. Centering is
-                    // done via auto margins on the page itself instead.
-                    // NOTE: no padding on the scroll container either. Padding
-                    // persists inside the scrollable area even when overflowing
-                    // (extra gray strip at bottom/right, shifted scroll max),
-                    // while auto margins collapse to zero. The visual gap is
-                    // provided by the margins via `fit_zoom`, not padding.
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(PAGE_GAP),
+                    // NOTE: no centering or padding on the scroll container.
+                    // A centered child that outgrows it gets its start edge
+                    // clipped and unreachable; padding persists inside the
+                    // scrollable area as dead strips. Per-page explicit
+                    // margins in `reanchor_scroll` do the centering instead.
                     overflow: Overflow::scroll(),
                     ..default()
                 },
                 BackgroundColor(Color::srgb(0.30, 0.30, 0.33)),
             ))
             .with_children(|viewport| {
-                viewport.spawn((
-                    PageImage,
-                    Node {
-                        width: Val::Px(w),
-                        height: Val::Px(h),
-                        // Auto margins center the page while it fits and
-                        // collapse to zero once it overflows, so scroll starts
-                        // at the top-left with nothing clipped.
-                        margin: UiRect::all(Val::Auto),
-                        ..default()
-                    },
-                    ImageNode::new(image),
-                ));
+                for (i, (handle, (w, h))) in handles.iter().zip(sizes).enumerate() {
+                    let entity = viewport
+                        .spawn((
+                            PageImage(i),
+                            Node {
+                                width: Val::Px(*w),
+                                height: Val::Px(*h),
+                                ..default()
+                            },
+                            ImageNode::new(handle.clone()),
+                        ))
+                        .id();
+                    entities.push(entity);
+                }
             });
             root.spawn((
                 Node {
@@ -706,24 +835,53 @@ fn setup_ui(
                 ));
             });
         });
+    entities
+}
+
+/// Jump the viewport to `target`: render it synchronously (same instant
+/// feedback the old single-page viewer had on every page turn), then scroll
+/// its top edge into view. Wheel scrolling between jumps needs no render —
+/// neighbors fill in via [`refresh`] within a frame or two.
+fn jump_to_page(
+    doc: &mut Doc,
+    images: &mut Assets<Image>,
+    scroll: &mut Query<&mut ScrollPosition, With<Viewport>>,
+    target: usize,
+) {
+    let target = target.min(doc.pages.max(1) - 1);
+    doc.page = target;
+    let dpi = doc.dpi;
+    render_slot(&doc.render, images, &mut doc.slots[target], target, dpi);
+    let sizes = page_display_sizes(doc);
+    if let Ok(mut pos) = scroll.single_mut() {
+        pos.0.y = page_offset_y(&sizes, target);
+    }
 }
 
 fn navigate(
     keys: Res<ButtonInput<KeyCode>>,
     mut exit: MessageWriter<AppExit>,
     mut doc: ResMut<Doc>,
-    mut page_nodes: Query<(&mut Node, &mut ImageNode), With<PageImage>>,
+    mut images: ResMut<Assets<Image>>,
+    mut scroll: Query<&mut ScrollPosition, With<Viewport>>,
 ) {
     if keys.just_pressed(KeyCode::ArrowRight) && doc.page + 1 < doc.pages {
-        doc.page += 1;
+        let target = doc.page + 1;
+        jump_to_page(&mut doc, &mut images, &mut scroll, target);
     } else if keys.just_pressed(KeyCode::ArrowLeft) && doc.page > 0 {
-        doc.page -= 1;
+        let target = doc.page - 1;
+        jump_to_page(&mut doc, &mut images, &mut scroll, target);
+    } else if keys.just_pressed(KeyCode::Home) {
+        jump_to_page(&mut doc, &mut images, &mut scroll, 0);
+    } else if keys.just_pressed(KeyCode::End) {
+        let last = doc.pages.max(1) - 1;
+        jump_to_page(&mut doc, &mut images, &mut scroll, last);
     } else if keys.just_pressed(KeyCode::ArrowUp) {
         let zoom = doc.zoom * KEY_ZOOM_STEP;
-        apply_display_zoom(&mut doc, zoom, &mut page_nodes);
+        apply_display_zoom(&mut doc, zoom);
     } else if keys.just_pressed(KeyCode::ArrowDown) {
         let zoom = doc.zoom / KEY_ZOOM_STEP;
-        apply_display_zoom(&mut doc, zoom, &mut page_nodes);
+        apply_display_zoom(&mut doc, zoom);
     } else if keys.just_pressed(KeyCode::Digit0) {
         doc.manual_zoom = false;
     } else if keys.just_pressed(KeyCode::KeyQ) {
@@ -736,7 +894,6 @@ fn wheel(
     mut pinches: MessageReader<PinchGesture>,
     keys: Res<ButtonInput<KeyCode>>,
     mut doc: ResMut<Doc>,
-    mut page_nodes: Query<(&mut Node, &mut ImageNode), With<PageImage>>,
     mut scroll: Query<&mut ScrollPosition, With<Viewport>>,
 ) {
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
@@ -767,7 +924,7 @@ fn wheel(
         let total = lines.y + pixel_part + pinch;
         if total != 0.0 {
             let zoom = doc.zoom * (total * WHEEL_ZOOM_SPEED).exp();
-            apply_display_zoom(&mut doc, zoom, &mut page_nodes);
+            apply_display_zoom(&mut doc, zoom);
         }
         // Swallow the scroll too: a pinching hand also drifts, and feeding
         // that drift into the viewport fights the zoom.
@@ -776,7 +933,7 @@ fn wheel(
     } else if pinch != 0.0 {
         // macOS/iOS native gesture (winit never emits this on Linux).
         let zoom = doc.zoom * (pinch * WHEEL_ZOOM_SPEED).exp();
-        apply_display_zoom(&mut doc, zoom, &mut page_nodes);
+        apply_display_zoom(&mut doc, zoom);
     }
     if lines != Vec2::ZERO || scroll_px != Vec2::ZERO {
         // Wheel-up (positive y) shows earlier content: move the viewport up.
@@ -794,11 +951,7 @@ fn wheel(
 /// The render dpi tracks the *physical* pixel density (`scale_factor`), so a
 /// HiDPI/retina display renders at 2x texels instead of GPU-upscaling a 1x
 /// texture — that upscale blur is the main "slightly fuzzy vs browser" gap.
-fn auto_fit(
-    windows: Query<&Window, With<PrimaryWindow>>,
-    mut doc: ResMut<Doc>,
-    mut page_nodes: Query<(&mut Node, &mut ImageNode), With<PageImage>>,
-) {
+fn auto_fit(windows: Query<&Window, With<PrimaryWindow>>, mut doc: ResMut<Doc>) {
     if doc.manual_zoom {
         return;
     }
@@ -810,7 +963,7 @@ fn auto_fit(
             doc.dpi = dpi;
         }
         if (zoom - doc.zoom).abs() > 0.0005 {
-            apply_display_zoom(&mut doc, zoom, &mut page_nodes);
+            apply_display_zoom(&mut doc, zoom);
         }
     }
 }
@@ -843,35 +996,84 @@ fn maybe_reraster(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn refresh(
     mut doc: ResMut<Doc>,
     mut images: ResMut<Assets<Image>>,
-    mut page_nodes: Query<(&mut Node, &mut ImageNode), With<PageImage>>,
+    mut page_nodes: Query<(&mut Node, &mut ImageNode, &PageImage)>,
     mut hud: Query<&mut Text, With<HudText>>,
 ) {
-    let need_raster = doc.page != doc.rendered_page || doc.dpi != doc.rendered_dpi;
-    if need_raster
-        && let Some(image) = (doc.render)(doc.page, doc.dpi)
-        && let Some(mut slot) = images.get_mut(&doc.image)
-    {
-        (doc.tex_w, doc.tex_h) = (image.width(), image.height());
-        doc.rendered_page = doc.page;
-        doc.rendered_dpi = doc.dpi;
-        doc.rendered_zoom = doc.zoom;
-        let (w, h) = display_size(image.width(), image.height(), doc.zoom, doc.dpi);
-        *slot = image;
-        for (mut node, _) in &mut page_nodes {
-            node.width = Val::Px(w);
-            node.height = Val::Px(h);
+    // Reconcile every Node with the current zoom/dpi. Guarded writes only,
+    // so a settled frame touches nothing and skips layout invalidation.
+    let sizes = page_display_sizes(&doc);
+    for (mut node, _, idx) in &mut page_nodes {
+        if let Some(&(w, h)) = sizes.get(idx.0) {
+            if !matches!(node.width, Val::Px(x) if (x - w).abs() <= 0.01) {
+                node.width = Val::Px(w);
+            }
+            if !matches!(node.height, Val::Px(x) if (x - h).abs() <= 0.01) {
+                node.height = Val::Px(h);
+            }
         }
-    } else if doc.is_changed() {
-        // Display-only change (per-tick zoom Node resize is already done in
-        // the input systems); keep the HUD in sync.
-    } else {
+    }
+    // Lazy fill: nearest dirty slot first, one backend render per frame, so
+    // a zoom settle on a long document sharpens progressively instead of
+    // stalling the frame loop.
+    let doc_mut = &mut *doc;
+    let current = doc_mut.page;
+    let mut order: Vec<usize> = (0..doc_mut.pages).collect();
+    order.sort_by_key(|&i| i.abs_diff(current));
+    let mut all_clean = true;
+    for i in order {
+        if doc_mut.slots[i].rendered_dpi != doc_mut.dpi {
+            all_clean = false;
+            let dpi = doc_mut.dpi;
+            render_slot(&doc_mut.render, &mut images, &mut doc_mut.slots[i], i, dpi);
+            break;
+        }
+    }
+    if all_clean {
+        doc_mut.rendered_zoom = doc_mut.zoom;
+    }
+    // Content-compare the HUD line: `doc` mutates most frames during
+    // progressive fills, and rewriting `Text` unconditionally would redo
+    // text layout every frame for an identical string.
+    let line = hud_line(&doc);
+    for mut text in &mut hud {
+        if text.0 != line {
+            text.0 = line.clone();
+        }
+    }
+}
+
+/// Track the current page from the scroll position.
+///
+/// Runs in PostUpdate after [`reanchor_scroll`], so `scroll` is the validated
+/// value: whichever page holds the viewport center is current. Keeps the HUD
+/// readout and [`refresh`]'s nearest-first order live while wheel-scrolling
+/// through the column.
+fn track_page(
+    mut doc: ResMut<Doc>,
+    viewport: Query<(&ComputedNode, &ScrollPosition), With<Viewport>>,
+) {
+    let Ok((computed, scroll)) = viewport.single() else {
+        return;
+    };
+    let vis = computed.size * computed.inverse_scale_factor;
+    if vis.y <= 1.0 {
         return;
     }
-    for mut text in &mut hud {
-        text.0 = hud_line(&doc);
+    let sizes = page_display_sizes(&doc);
+    if sizes.is_empty() {
+        return;
     }
+    let center = scroll.0.y + vis.y * 0.5;
+    let mut acc = 0.0;
+    let mut current = 0;
+    for (i, (_, h)) in sizes.iter().enumerate() {
+        if center >= acc {
+            current = i;
+        }
+        acc += h + PAGE_GAP;
+    }
+    doc.page = current.min(doc.pages.max(1) - 1);
 }
