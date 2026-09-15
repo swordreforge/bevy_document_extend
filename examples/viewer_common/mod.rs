@@ -31,6 +31,7 @@
 use bevy::input::gestures::PinchGesture;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
+use bevy::ui::UiSystems;
 use bevy::window::PrimaryWindow;
 
 /// Render resolution at zoom == 1.0.
@@ -76,6 +77,14 @@ struct Doc {
     /// Last rendered texture size, for [`display_size`] without re-render.
     tex_w: u32,
     tex_h: u32,
+    /// Validated post-layout `(content, scroll)` snapshot from the previous
+    /// frame. [`reanchor_scroll`] diffs the page Node size against
+    /// `anchor_content` to tell zoom ticks from scroll-only frames, anchoring
+    /// zoom on the viewport-center content point; scroll passes through with
+    /// a single fresh clamp.
+    anchor_content: Vec2,
+    anchor_scroll: Vec2,
+    anchor_init: bool,
     /// Committed render dpi. [`maybe_reraster`] updates it from the display
     /// zoom after a settle delay; [`refresh`] re-renders only when
     /// `(page, dpi)` differs from `(rendered_page, rendered_dpi)`, so
@@ -100,49 +109,93 @@ fn render_dpi(zoom: f32) -> u32 {
     (BASE_DPI * zoom).round().clamp(36.0, 600.0) as u32
 }
 
-/// Display-side zoom update: resize the page Node from the existing texture
-/// immediately (the expensive re-raster happens later in [`maybe_reraster`]),
-/// keeping the content point under the viewport center stable.
+/// Re-anchor scroll *after* layout, against fresh geometry.
 ///
-/// Without the scroll compensation, an overflowing page stays top-left
-/// anchored (scroll 0,0) while zooming, so growth appears to extend
-/// right/down only — "zooms from the left edge". Re-anchoring per axis:
-/// take the content point under the viewport center before the resize
-/// (content center while it fits, `scroll + center` once overflowing),
-/// scale it by the size ratio, and re-center the viewport on it.
+/// Input systems only resize the page Node and bump `ScrollPosition` blindly.
+/// This system runs in PostUpdate after [`UiSystems::Layout`] and owns the
+/// final scroll value:
+/// - content unchanged since last frame → pass the input scroll through,
+///   clamped to the fresh max (this is the only clamp in the codebase —
+///   the wheel handler does pure addition, no per-tick recompute);
+/// - content changed (zoom tick) → keep the content point under the viewport
+///   center stable: anchor from last frame's validated `(content, scroll)`
+///   snapshot, scale by the real size ratio, re-center, clamp.
+///
+/// Everything here reads post-layout `ComputedNode`, so there is no
+/// stale-size bias — the old code read pre-layout sizes at input time, which
+/// is what dragged the zoom center downward as zoom grew.
+fn reanchor_scroll(
+    mut doc: ResMut<Doc>,
+    mut viewport: Query<(&ComputedNode, &mut ScrollPosition), With<Viewport>>,
+    mut page_nodes: Query<&mut Node, With<PageImage>>,
+) {
+    let Ok((computed, mut scroll)) = viewport.single_mut() else {
+        return;
+    };
+    let Ok(mut page) = page_nodes.single_mut() else {
+        return;
+    };
+    let (Val::Px(w), Val::Px(h)) = (page.width, page.height) else {
+        return;
+    };
+    let vis = computed.size * computed.inverse_scale_factor;
+    if vis.x <= 1.0 || vis.y <= 1.0 {
+        return;
+    }
+    let content = Vec2::new(w, h);
+    // Explicit centering margins instead of margin:Auto. Taffy counts a
+    // single-sided auto margin into content_size (logs show content - node
+    // == (vis - node)/2), inflating the scroll range with phantom space.
+    let mx = ((vis.x - content.x) * 0.5).max(0.0);
+    let my = ((vis.y - content.y) * 0.5).max(0.0);
+    if !matches!(page.margin.left, Val::Px(x) if (x - mx).abs() <= 0.01) {
+        page.margin.left = Val::Px(mx);
+        page.margin.right = Val::Px(mx);
+    }
+    if !matches!(page.margin.top, Val::Px(y) if (y - my).abs() <= 0.01) {
+        page.margin.top = Val::Px(my);
+        page.margin.bottom = Val::Px(my);
+    }
+    let total = content + Vec2::new(mx * 2.0, my * 2.0);
+    let max = (total - vis).max(Vec2::ZERO);
+    let out = if doc.anchor_init && (content - doc.anchor_content).abs().max_element() > 0.5 {
+        // Zoom tick: re-center on the viewport-center content point.
+        let mut out = Vec2::ZERO;
+        for i in 0..2 {
+            let v = vis[i].max(1.0);
+            let c_new = content[i].max(1.0);
+            let c_old = doc.anchor_content[i].max(1.0);
+            let p = if c_old <= v {
+                c_old * 0.5
+            } else {
+                doc.anchor_scroll[i] + v * 0.5
+            };
+            out[i] = (p * (c_new / c_old) - v * 0.5).clamp(0.0, (c_new - v).max(0.0));
+        }
+        out
+    } else {
+        // Scroll-only frame (or first frame): keep input scroll, fresh clamp.
+        scroll.0.clamp(Vec2::ZERO, max)
+    };
+    scroll.0 = out;
+    doc.anchor_content = content;
+    doc.anchor_scroll = out;
+    doc.anchor_init = true;
+}
+
 fn apply_display_zoom(
     doc: &mut Doc,
     zoom: f32,
     page_nodes: &mut Query<(&mut Node, &mut ImageNode), With<PageImage>>,
-    viewport: &mut Query<(&ComputedNode, &mut ScrollPosition), With<Viewport>>,
 ) {
     let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-    let old = display_size(doc.tex_w, doc.tex_h, doc.zoom, doc.dpi);
-    let new = display_size(doc.tex_w, doc.tex_h, zoom, doc.dpi);
     doc.zoom = zoom;
     doc.zoom_idle = 0.0;
     doc.manual_zoom = true;
+    let (w, h) = display_size(doc.tex_w, doc.tex_h, doc.zoom, doc.dpi);
     for (mut node, _) in page_nodes {
-        node.width = Val::Px(new.0);
-        node.height = Val::Px(new.1);
-    }
-    if let Ok((computed, mut scroll)) = viewport.single_mut() {
-        let vis = computed.size * computed.inverse_scale_factor - Vec2::splat(VIEWPORT_PADDING);
-        let old = Vec2::new(old.0, old.1);
-        let new = Vec2::new(new.0, new.1);
-        let mut s = scroll.0;
-        for i in 0..2 {
-            let v = vis[i].max(1.0);
-            let c_old = old[i].max(1.0);
-            let c_new = new[i].max(1.0);
-            let p = if c_old <= v {
-                c_old * 0.5
-            } else {
-                s[i] + v * 0.5
-            };
-            s[i] = (p * (c_new / c_old) - v * 0.5).clamp(0.0, (c_new - v).max(0.0));
-        }
-        scroll.0 = s;
+        node.width = Val::Px(w);
+        node.height = Val::Px(h);
     }
 }
 
@@ -197,6 +250,9 @@ pub fn run(
             manual_zoom: !fit,
             tex_w,
             tex_h,
+            anchor_content: Vec2::ZERO,
+            anchor_scroll: Vec2::ZERO,
+            anchor_init: false,
             dpi,
             rendered_page: page,
             rendered_dpi: dpi,
@@ -219,6 +275,7 @@ pub fn run(
         Update,
         (navigate, auto_fit, wheel, maybe_reraster, refresh).chain(),
     )
+    .add_systems(PostUpdate, reanchor_scroll.after(UiSystems::Layout))
     .run();
 }
 
@@ -244,8 +301,12 @@ fn setup_ui(commands: &mut Commands, doc: &Doc, w: f32, h: f32) {
                     // clipped and unreachable, which made zoom visibly jump
                     // right once the page exceeded the viewport. Centering is
                     // done via auto margins on the page itself instead.
+                    // NOTE: no padding on the scroll container either. Padding
+                    // persists inside the scrollable area even when overflowing
+                    // (extra gray strip at bottom/right, shifted scroll max),
+                    // while auto margins collapse to zero. The visual gap is
+                    // provided by the margins via `fit_zoom`, not padding.
                     overflow: Overflow::scroll(),
-                    padding: UiRect::all(Val::Px(VIEWPORT_PADDING / 2.0)),
                     ..default()
                 },
                 BackgroundColor(Color::srgb(0.30, 0.30, 0.33)),
@@ -300,7 +361,6 @@ fn navigate(
     keys: Res<ButtonInput<KeyCode>>,
     mut doc: ResMut<Doc>,
     mut page_nodes: Query<(&mut Node, &mut ImageNode), With<PageImage>>,
-    mut viewport: Query<(&ComputedNode, &mut ScrollPosition), With<Viewport>>,
 ) {
     if keys.just_pressed(KeyCode::ArrowRight) && doc.page + 1 < doc.pages {
         doc.page += 1;
@@ -308,10 +368,10 @@ fn navigate(
         doc.page -= 1;
     } else if keys.just_pressed(KeyCode::ArrowUp) {
         let zoom = doc.zoom * KEY_ZOOM_STEP;
-        apply_display_zoom(&mut doc, zoom, &mut page_nodes, &mut viewport);
+        apply_display_zoom(&mut doc, zoom, &mut page_nodes);
     } else if keys.just_pressed(KeyCode::ArrowDown) {
         let zoom = doc.zoom / KEY_ZOOM_STEP;
-        apply_display_zoom(&mut doc, zoom, &mut page_nodes, &mut viewport);
+        apply_display_zoom(&mut doc, zoom, &mut page_nodes);
     } else if keys.just_pressed(KeyCode::Digit0) {
         doc.manual_zoom = false;
     } else if keys.just_pressed(KeyCode::KeyQ) {
@@ -325,7 +385,7 @@ fn wheel(
     keys: Res<ButtonInput<KeyCode>>,
     mut doc: ResMut<Doc>,
     mut page_nodes: Query<(&mut Node, &mut ImageNode), With<PageImage>>,
-    mut viewport: Query<(&ComputedNode, &mut ScrollPosition), With<Viewport>>,
+    mut scroll: Query<&mut ScrollPosition, With<Viewport>>,
 ) {
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let mut lines = Vec2::ZERO;
@@ -355,7 +415,7 @@ fn wheel(
         let total = lines.y + pixel_part + pinch;
         if total != 0.0 {
             let zoom = doc.zoom * (total * WHEEL_ZOOM_SPEED).exp();
-            apply_display_zoom(&mut doc, zoom, &mut page_nodes, &mut viewport);
+            apply_display_zoom(&mut doc, zoom, &mut page_nodes);
         }
         // Swallow the scroll too: a pinching hand also drifts, and feeding
         // that drift into the viewport fights the zoom.
@@ -364,11 +424,14 @@ fn wheel(
     } else if pinch != 0.0 {
         // macOS/iOS native gesture (winit never emits this on Linux).
         let zoom = doc.zoom * (pinch * WHEEL_ZOOM_SPEED).exp();
-        apply_display_zoom(&mut doc, zoom, &mut page_nodes, &mut viewport);
+        apply_display_zoom(&mut doc, zoom, &mut page_nodes);
     }
     if lines != Vec2::ZERO || scroll_px != Vec2::ZERO {
         // Wheel-up (positive y) shows earlier content: move the viewport up.
-        if let Ok((_, mut pos)) = viewport.single_mut() {
+        // Pure addition here — the single fresh clamp lives in
+        // [`reanchor_scroll`] (PostUpdate, after layout), so scrolling no
+        // longer recomputes anything per tick.
+        if let Ok(mut pos) = scroll.single_mut() {
             pos.0 -= scroll_px + lines * LINE_SCROLL_PX;
         }
     }
@@ -379,7 +442,6 @@ fn auto_fit(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut doc: ResMut<Doc>,
     mut page_nodes: Query<(&mut Node, &mut ImageNode), With<PageImage>>,
-    mut viewport: Query<(&ComputedNode, &mut ScrollPosition), With<Viewport>>,
 ) {
     if doc.manual_zoom {
         return;
@@ -387,7 +449,7 @@ fn auto_fit(
     if let Ok(window) = windows.single() {
         let zoom = fit_zoom(window.width(), doc.native_w);
         if (zoom - doc.zoom).abs() > 0.0005 {
-            apply_display_zoom(&mut doc, zoom, &mut page_nodes, &mut viewport);
+            apply_display_zoom(&mut doc, zoom, &mut page_nodes);
         }
     }
 }
