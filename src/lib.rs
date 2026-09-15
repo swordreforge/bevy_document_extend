@@ -16,4 +16,4 @@ pub use pdf::{
     rasterize_page, rasterize_page_to_bevy,
 };
 
-pub use viewer::{DocumentViewer, DocumentViewerPlugin, RenderCallbackCell};
+pub use viewer::{DocumentSource, DocumentViewerPlugin, ViewerArgs};

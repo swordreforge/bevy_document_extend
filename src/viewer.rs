@@ -1,9 +1,9 @@
 //! Scrollable document viewer UI, usable as a Bevy [`Plugin`].
 //!
-//! Add [`DocumentViewerPlugin`] (configured with [`DocumentViewer`]) to your
-//! [`App`](bevy::prelude::App) alongside `DefaultPlugins` instead of building
-//! windows by hand: the plugin spawns the page viewport, HUD bar, input
-//! systems and debounced re-raster wiring for you.
+//! Add [`DocumentViewerPlugin`] to your [`App`](bevy::prelude::App) alongside
+//! `DefaultPlugins`: the plugin itself is the config — set its fields and add
+//! it. It spawns the page viewport, HUD bar, input systems and debounced
+//! re-raster wiring for you.
 //!
 //! Layout: full-window scrollable page image, bottom HUD bar with the probe
 //! line plus `←/→ page · wheel/pinch scroll · Ctrl+wheel/pinch zoom · ↑/↓ zoom · 0 fit · Q quit`.
@@ -32,64 +32,87 @@ use bevy::prelude::*;
 use bevy::ui::UiSystems;
 use bevy::window::PrimaryWindow;
 
-/// Viewer configuration. Passed to [`DocumentViewerPlugin`]; `render`
-/// supplies a fresh page [`Image`] on demand, so the UI only swaps the page
-/// asset on navigation — no re-parse of the format is needed per key press.
-///
-/// `fit` selects the initial zoom mode: fit-to-window-width (the default,
-/// kept live on resize until the user zooms) or the explicit `dpi`.
-pub struct DocumentViewer {
-    pub title: String,
-    pub probe: String,
-    pub pages: usize,
-    pub page: usize,
-    pub dpi: u32,
-    pub fit: bool,
-    pub first: Image,
-    pub render: RenderCallbackCell,
-}
-
 /// Page-render callback: fresh Bevy [`Image`] on demand; `None` keeps the
 /// current page on screen.
 type RenderCallback = dyn Fn(usize, u32) -> Option<Image> + Send + Sync;
 
-/// Interior-mutable holder for the page-render closure.
+/// Page bytes plus render closure for the viewer. Insert once before or after
+/// adding [`DocumentViewerPlugin`]; the plugin's [`Startup`] system consumes
+/// it (registers the first page as an [`Image`] asset, moves the closure into
+/// the viewer state).
 ///
-/// `Plugin::build` receives `&self`, but the closure is `Fn` (not `Clone`)
-/// and must move into the [`Doc`] resource exactly once — so it lives behind
-/// a one-shot lock instead of a plain field.
-pub struct RenderCallbackCell {
-    cell: std::sync::Mutex<Option<Box<RenderCallback>>>,
+/// Keeping the closure in a [`Resource`] instead of the plugin avoids
+/// one-shot interior mutability in `Plugin::build` (`build` only gets `&self`,
+/// so a plugin-held `Fn` would need a `Mutex` + `take()` + panic-on-reuse).
+#[derive(Resource)]
+pub struct DocumentSource {
+    pub first: Image,
+    render: Option<Box<RenderCallback>>,
 }
 
-// `Mutex` is `Sync` when the contents are `Send`; assert the same for the
-// cell so [`DocumentViewerPlugin`] stays a valid `Plugin`.
-unsafe impl Sync for RenderCallbackCell {}
-
-impl RenderCallbackCell {
-    pub fn new(f: impl Fn(usize, u32) -> Option<Image> + Send + Sync + 'static) -> Self {
+impl DocumentSource {
+    pub fn new(
+        first: Image,
+        render: impl Fn(usize, u32) -> Option<Image> + Send + Sync + 'static,
+    ) -> Self {
         Self {
-            cell: std::sync::Mutex::new(Some(Box::new(f))),
+            first,
+            render: Some(Box::new(render)),
         }
     }
+}
 
-    fn take(&self) -> Box<RenderCallback> {
-        self.cell
-            .lock()
-            .expect("render cell unlocked")
-            .take()
-            .expect("DocumentViewer builds one App")
+/// CLI args for the bundled `*_viewer` examples, parsed in one place so the
+/// `fit` semantics stay consistent: `path [page] [dpi] [--fit | --no-fit]`.
+///
+/// Without flags, omitting `dpi` means fit-to-width and passing `dpi` means
+/// explicit zoom — `--fit` / `--no-fit` override that default either way.
+pub struct ViewerArgs {
+    pub path: String,
+    pub page: usize,
+    pub dpi: u32,
+    pub fit: bool,
+}
+
+impl ViewerArgs {
+    pub fn parse(default_path: &str) -> Self {
+        let rest: Vec<String> = std::env::args().skip(1).collect();
+        let path = rest
+            .first()
+            .filter(|s| !s.starts_with("--"))
+            .cloned()
+            .unwrap_or_else(|| default_path.to_string());
+        // Positional slots skip flags, so `viewer file --fit` still resolves
+        // page/dpi defaults instead of parsing the flag as a number.
+        let positionals: Vec<&String> = rest.iter().filter(|s| !s.starts_with("--")).collect();
+        let page = positionals.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let dpi_arg = positionals.get(2).copied();
+        let dpi = dpi_arg.and_then(|s| s.parse().ok()).unwrap_or(150);
+        let mut fit = dpi_arg.is_none();
+        if rest.iter().any(|a| a == "--fit") {
+            fit = true;
+        }
+        if rest.iter().any(|a| a == "--no-fit") {
+            fit = false;
+        }
+        Self {
+            path,
+            page,
+            dpi,
+            fit,
+        }
     }
 }
 
 /// Adds the scrollable document viewer UI to an [`App`](bevy::prelude::App).
 ///
-/// Construct with a [`DocumentViewer`] config:
+/// The plugin holds plain copyable config; the page closure travels in a
+/// [`DocumentSource`] resource, inserted before or after `add_plugins`:
 ///
 /// ```no_run
 /// use bevy::prelude::*;
 /// use bevy_document_extend::viewer::{
-///     DocumentViewer, DocumentViewerPlugin, RenderCallbackCell,
+///     DocumentSource, DocumentViewerPlugin,
 /// };
 ///
 /// # fn load_first_page() -> Image { unimplemented!() }
@@ -97,63 +120,40 @@ impl RenderCallbackCell {
 /// App::new()
 ///     .add_plugins((
 ///         DefaultPlugins,
-///         DocumentViewerPlugin(DocumentViewer {
+///         DocumentViewerPlugin {
 ///             title: "report.pdf".to_string(),
 ///             probe: "3 pages".to_string(),
 ///             pages: 3,
 ///             page: 0,
 ///             dpi: 150,
 ///             fit: true,
-///             first: load_first_page(),
-///             render: RenderCallbackCell::new(render_page),
-///         }),
+///         },
 ///     ))
+///     .insert_resource(DocumentSource::new(load_first_page(), render_page))
 ///     .run();
 /// ```
-pub struct DocumentViewerPlugin(pub DocumentViewer);
+pub struct DocumentViewerPlugin {
+    pub title: String,
+    pub probe: String,
+    pub pages: usize,
+    pub page: usize,
+    pub dpi: u32,
+    pub fit: bool,
+}
 
 impl Plugin for DocumentViewerPlugin {
     fn build(&self, app: &mut App) {
-        let viewer = &self.0;
-        let page = viewer.page.min(viewer.pages.max(1) - 1);
-        let native_w = viewer.first.width() as f32 * BASE_DPI / viewer.dpi.max(1) as f32;
-        let zoom = if viewer.fit {
-            fit_zoom(ASSUMED_WINDOW_W, native_w)
-        } else {
-            (viewer.dpi as f32 / BASE_DPI).clamp(MIN_ZOOM, MAX_ZOOM)
-        };
-        let dpi = render_dpi(zoom);
-        let (w, h) = display_size(viewer.first.width(), viewer.first.height(), zoom, dpi);
-        let (tex_w, tex_h) = (viewer.first.width(), viewer.first.height());
-        let first = viewer.first.clone();
+        let page = self.page.min(self.pages.max(1) - 1);
         app.insert_resource(ClearColor(Color::srgb(0.12, 0.12, 0.14)))
-            .insert_resource(PendingFirstPage(first))
-            .insert_resource(Doc {
-                title: viewer.title.clone(),
-                probe: viewer.probe.clone(),
-                pages: viewer.pages,
+            .insert_resource(ViewerConfig {
+                title: self.title.clone(),
+                probe: self.probe.clone(),
+                pages: self.pages,
                 page,
-                zoom,
-                rendered_zoom: zoom,
-                zoom_idle: RERASTER_DELAY,
-                native_w,
-                manual_zoom: !viewer.fit,
-                tex_w,
-                tex_h,
-                anchor_content: Vec2::ZERO,
-                anchor_scroll: Vec2::ZERO,
-                anchor_init: false,
-                dpi,
-                rendered_page: page,
-                rendered_dpi: dpi,
-                image: Handle::default(),
-                // `render` is `Fn`, not `Clone`, and `Plugin::build` only gets
-                // `&self` — so the closure moves out of the one-shot
-                // [`RenderCallbackCell`] exactly once per App build.
-                render: viewer.render.take(),
+                dpi: self.dpi,
+                fit: self.fit,
             })
-            .insert_resource(ViewerLayout { w, h })
-            .add_systems(Startup, (add_first_image, setup_ui).chain())
+            .add_systems(Startup, setup_from_source)
             .add_systems(
                 Update,
                 (navigate, auto_fit, wheel, maybe_reraster, refresh).chain(),
@@ -162,27 +162,218 @@ impl Plugin for DocumentViewerPlugin {
     }
 }
 
-/// Page size for the initial [`setup_ui`] spawn, captured at plugin build.
+/// Copyable viewer config, derived from the plugin at build time.
+///
+/// Kept separate from [`Doc`] (runtime zoom/scroll/render state) so systems
+/// read one and mutate the other.
 #[derive(Resource)]
-struct ViewerLayout {
-    w: f32,
-    h: f32,
+struct ViewerConfig {
+    title: String,
+    probe: String,
+    pages: usize,
+    page: usize,
+    dpi: u32,
+    fit: bool,
 }
 
-/// Pre-rasterized first page, registered as an [`Image`] asset on [`Startup`].
-#[derive(Resource)]
-struct PendingFirstPage(Image);
-
-/// Registers the pre-rasterized first page as an [`Image`] asset.
-fn add_first_image(
+/// Builds viewer state from [`ViewerConfig`] + [`DocumentSource`].
+///
+/// Runs on [`Startup`]: derives zoom from the real first-page size,
+/// registers it as an [`Image`] asset, and moves the render closure into
+/// [`Doc`]. Splitting this out of `Plugin::build` is what lets the plugin
+/// stay plain data (no closure, no interior mutability).
+fn setup_from_source(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    mut doc: ResMut<Doc>,
-    pending: Res<PendingFirstPage>,
+    config: Res<ViewerConfig>,
+    mut source: ResMut<DocumentSource>,
 ) {
-    let handle = images.add(pending.0.clone());
-    doc.image = handle;
-    commands.remove_resource::<PendingFirstPage>();
+    let source = &mut *source;
+    let first = std::mem::take(&mut source.first);
+    let render = source
+        .render
+        .take()
+        .expect("DocumentSource holds one render closure");
+    let native_w = first.width() as f32 * BASE_DPI / config.dpi.max(1) as f32;
+    let zoom = if config.fit {
+        fit_zoom(ASSUMED_WINDOW_W, native_w)
+    } else {
+        (config.dpi as f32 / BASE_DPI).clamp(MIN_ZOOM, MAX_ZOOM)
+    };
+    let dpi = render_dpi(zoom);
+    let (w, h) = display_size(first.width(), first.height(), zoom, dpi);
+    let (tex_w, tex_h) = (first.width(), first.height());
+    let handle = images.add(first);
+    let image = handle.clone();
+    commands.insert_resource(Doc {
+        title: config.title.clone(),
+        probe: config.probe.clone(),
+        pages: config.pages,
+        page: config.page,
+        zoom,
+        rendered_zoom: zoom,
+        zoom_idle: RERASTER_DELAY,
+        native_w,
+        manual_zoom: !config.fit,
+        tex_w,
+        tex_h,
+        anchor_content: Vec2::ZERO,
+        anchor_scroll: Vec2::ZERO,
+        anchor_init: false,
+        dpi,
+        rendered_page: config.page,
+        rendered_dpi: dpi,
+        image: handle,
+        render,
+    });
+    commands.remove_resource::<DocumentSource>();
+    let doc = DocRef {
+        title: config.title.clone(),
+        probe: config.probe.clone(),
+        pages: config.pages,
+        page: config.page,
+        dpi,
+        zoom,
+    };
+    setup_ui(commands, &doc, image, w, h);
+}
+
+/// Minimal snapshot for HUD text — implemented for both the [`setup_ui`]
+/// bootstrap ([`DocRef`]) and the runtime [`Doc`], so one format string
+/// serves initial spawn and per-frame [`refresh`] updates.
+trait HudState {
+    fn title(&self) -> &str;
+    fn probe(&self) -> &str;
+    fn page(&self) -> usize;
+    fn pages(&self) -> usize;
+    fn dpi(&self) -> u32;
+    fn zoom(&self) -> f32;
+}
+
+struct DocRef {
+    title: String,
+    probe: String,
+    pages: usize,
+    page: usize,
+    dpi: u32,
+    zoom: f32,
+}
+
+impl HudState for DocRef {
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn probe(&self) -> &str {
+        &self.probe
+    }
+    fn page(&self) -> usize {
+        self.page
+    }
+    fn pages(&self) -> usize {
+        self.pages
+    }
+    fn dpi(&self) -> u32 {
+        self.dpi
+    }
+    fn zoom(&self) -> f32 {
+        self.zoom
+    }
+}
+
+impl HudState for Doc {
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn probe(&self) -> &str {
+        &self.probe
+    }
+    fn page(&self) -> usize {
+        self.page
+    }
+    fn pages(&self) -> usize {
+        self.pages
+    }
+    fn dpi(&self) -> u32 {
+        self.dpi
+    }
+    fn zoom(&self) -> f32 {
+        self.zoom
+    }
+}
+
+impl<T: HudState + ?Sized> HudState for &T {
+    fn title(&self) -> &str {
+        (**self).title()
+    }
+    fn probe(&self) -> &str {
+        (**self).probe()
+    }
+    fn page(&self) -> usize {
+        (**self).page()
+    }
+    fn pages(&self) -> usize {
+        (**self).pages()
+    }
+    fn dpi(&self) -> u32 {
+        (**self).dpi()
+    }
+    fn zoom(&self) -> f32 {
+        (**self).zoom()
+    }
+}
+
+impl HudState for Res<'_, Doc> {
+    fn title(&self) -> &str {
+        (**self).title()
+    }
+    fn probe(&self) -> &str {
+        (**self).probe()
+    }
+    fn page(&self) -> usize {
+        (**self).page()
+    }
+    fn pages(&self) -> usize {
+        (**self).pages()
+    }
+    fn dpi(&self) -> u32 {
+        (**self).dpi()
+    }
+    fn zoom(&self) -> f32 {
+        (**self).zoom()
+    }
+}
+
+impl HudState for ResMut<'_, Doc> {
+    fn title(&self) -> &str {
+        (**self).title()
+    }
+    fn probe(&self) -> &str {
+        (**self).probe()
+    }
+    fn page(&self) -> usize {
+        (**self).page()
+    }
+    fn pages(&self) -> usize {
+        (**self).pages()
+    }
+    fn dpi(&self) -> u32 {
+        (**self).dpi()
+    }
+    fn zoom(&self) -> f32 {
+        (**self).zoom()
+    }
+}
+
+fn hud_line(doc: &(impl HudState + ?Sized)) -> String {
+    format!(
+        "{} — {} · page {}/{} · {}dpi · {:.0}% · ←/→ page · wheel scroll · Ctrl+wheel/pinch zoom · ↑/↓ zoom · 0 fit · Q quit",
+        doc.title(),
+        doc.probe(),
+        doc.page() + 1,
+        doc.pages(),
+        doc.dpi(),
+        doc.zoom() * 100.0,
+    )
 }
 
 /// Render resolution at zoom == 1.0.
@@ -360,7 +551,13 @@ fn display_size(img_w: u32, img_h: u32, zoom: f32, dpi: u32) -> (f32, f32) {
     (img_w as f32 * k, img_h as f32 * k)
 }
 
-fn setup_ui(mut commands: Commands, doc: Res<Doc>, layout: Res<ViewerLayout>) {
+fn setup_ui(
+    mut commands: Commands,
+    doc: &(impl HudState + ?Sized),
+    image: Handle<Image>,
+    w: f32,
+    h: f32,
+) {
     commands.spawn(Camera2d);
     commands
         .spawn((
@@ -396,15 +593,15 @@ fn setup_ui(mut commands: Commands, doc: Res<Doc>, layout: Res<ViewerLayout>) {
                 viewport.spawn((
                     PageImage,
                     Node {
-                        width: Val::Px(layout.w),
-                        height: Val::Px(layout.h),
+                        width: Val::Px(w),
+                        height: Val::Px(h),
                         // Auto margins center the page while it fits and
                         // collapse to zero once it overflows, so scroll starts
                         // at the top-left with nothing clipped.
                         margin: UiRect::all(Val::Auto),
                         ..default()
                     },
-                    ImageNode::new(doc.image.clone()),
+                    ImageNode::new(image),
                 ));
             });
             root.spawn((
@@ -418,24 +615,12 @@ fn setup_ui(mut commands: Commands, doc: Res<Doc>, layout: Res<ViewerLayout>) {
             .with_children(|hud| {
                 hud.spawn((
                     HudText,
-                    Text::new(hud_line(&doc)),
+                    Text::new(hud_line(doc)),
                     TextFont::from_font_size(14.0),
                     TextColor(Color::WHITE),
                 ));
             });
         });
-}
-
-fn hud_line(doc: &Doc) -> String {
-    format!(
-        "{} — {} · page {}/{} · {}dpi · {:.0}% · ←/→ page · wheel scroll · Ctrl+wheel/pinch zoom · ↑/↓ zoom · 0 fit · Q quit",
-        doc.title,
-        doc.probe,
-        doc.page + 1,
-        doc.pages,
-        doc.dpi,
-        doc.zoom * 100.0,
-    )
 }
 
 fn navigate(
