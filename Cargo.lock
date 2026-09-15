@@ -890,8 +890,10 @@ dependencies = [
  "hayro",
  "image",
  "office2pdf",
+ "quick-xml 0.41.0",
  "rdocx",
  "rust_xlsxwriter",
+ "zip 0.6.6",
  "zpdf",
 ]
 

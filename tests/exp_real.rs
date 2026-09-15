@@ -9,6 +9,8 @@ static PDF: &[u8] = include_bytes!(
 );
 static DOCX: &[u8] = include_bytes!("exp/docx/sample3.docx");
 static XLSX: &[u8] = include_bytes!("exp/xlsx/sample100.xlsx");
+#[cfg(feature = "pptx-office")]
+static PPTX: &[u8] = include_bytes!("exp/pptx/sample.pptx");
 
 #[test]
 #[cfg(any(feature = "pdf-hayro", feature = "pdf-zpdf"))]
@@ -59,5 +61,31 @@ fn xlsx_real_renders_through_office2pdf() {
     let buf = bevy_document_extend::xlsx::rasterize_page(XLSX, 0, 72).expect("rasterize p0");
     assert_eq!((buf.width, buf.height), (612, 792));
     let all = bevy_document_extend::xlsx::rasterize_all(XLSX, 72).expect("rasterize all");
+    assert_eq!(all.len(), pages);
+}
+
+#[test]
+#[cfg(feature = "pptx-office")]
+fn pptx_real_probes_and_extracts() {
+    let meta = bevy_document_extend::pptx::probe(PPTX).expect("probe real pptx");
+    assert_eq!(meta.slides, 8);
+    let text = bevy_document_extend::pptx::extract_text(PPTX).expect("extract text");
+    assert!(text.contains("Sample Presentation"));
+    assert!(text.contains("Agenda"));
+}
+
+#[test]
+#[cfg(all(
+    feature = "pptx-office",
+    feature = "pptx-office2pdf",
+    any(feature = "pdf-hayro", feature = "pdf-zpdf")
+))]
+fn pptx_real_renders_through_office2pdf() {
+    let pages = bevy_document_extend::pptx::page_count(PPTX).expect("page count");
+    assert!(pages >= 1);
+    let buf = bevy_document_extend::pptx::rasterize_page(PPTX, 0, 72).expect("rasterize p0");
+    assert!(buf.width > 0 && buf.height > 0);
+    assert_eq!(buf.rgba.len(), buf.width as usize * buf.height as usize * 4);
+    let all = bevy_document_extend::pptx::rasterize_all(PPTX, 72).expect("rasterize all");
     assert_eq!(all.len(), pages);
 }

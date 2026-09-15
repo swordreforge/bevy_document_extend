@@ -6,14 +6,14 @@ name = "bevy_document_extend"
 # `--no-verify` because verification resolves unpatched crates.io deps.
 version = "0.1.0-alpha.0"
 edition = "2024"
-description = "Bevy document rendering extensions: rasterize PDF/DOCX/XLSX pages to Bevy images"
+description = "Bevy document rendering extensions: rasterize PDF/DOCX/XLSX/PPTX pages to Bevy images"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/swordreforge/bevy_document_extend"
 keywords = ["bevy", "pdf", "docx", "xlsx", "render"]
 categories = ["game-engines", "multimedia"]
 
 [features]
-default = ["pdf-hayro", "docx-rdocx", "xlsx-calamine-office2pdf"]
+default = ["pdf-hayro", "docx-rdocx", "xlsx-calamine-office2pdf", "pptx-office"]
 pdf = ["pdf-hayro"]
 pdf-hayro = ["dep:hayro"]
 pdf-zpdf = ["dep:zpdf"]
@@ -25,6 +25,11 @@ xlsx-office2pdf = ["dep:office2pdf"]
 # Render-only wiring: xlsx -> office2pdf -> pdf -> hayro rasterizer, so
 # `xlsx`/`xlsx-calamine-office2pdf` alone renders out of the box.
 xlsx-calamine-office2pdf = ["xlsx-calamine", "xlsx-office2pdf", "pdf-hayro"]
+pptx = ["pptx-office"]
+# Probe/extract use zip+quick-xml directly on the OPC package; render-only
+# wiring: pptx -> office2pdf -> pdf -> hayro rasterizer, mirroring xlsx.
+pptx-office = ["dep:zip", "dep:quick-xml", "pptx-office2pdf", "pdf-hayro"]
+pptx-office2pdf = ["dep:office2pdf"]
 
 [dependencies]
 bevy = { version = "0.19.1", features = ["gestures"] }
@@ -34,6 +39,8 @@ zpdf = { version = "0.13", optional = true }
 rdocx = { version = "0.13", optional = true, default-features = false }
 calamine = { version = "0.36", optional = true }
 office2pdf = { version = "0.7", optional = true, default-features = false }
+zip = { version = "0.6", optional = true, default-features = false, features = ["deflate"] }
+quick-xml = { version = "0.41", optional = true }
 
 [dev-dependencies]
 rdocx = { version = "0.13", default-features = false }
